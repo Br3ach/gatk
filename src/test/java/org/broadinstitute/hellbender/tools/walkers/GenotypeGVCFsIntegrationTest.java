@@ -4,6 +4,7 @@ import htsjdk.samtools.seekablestream.SeekablePathStream;
 import htsjdk.samtools.util.FileExtensions;
 import htsjdk.samtools.util.Locatable;
 import htsjdk.variant.utils.VCFHeaderReader;
+import htsjdk.variant.vcf.VCFFileReader;
 import htsjdk.variant.variantcontext.Allele;
 import htsjdk.variant.variantcontext.Genotype;
 import htsjdk.variant.variantcontext.VariantContext;
@@ -1226,6 +1227,124 @@ public class GenotypeGVCFsIntegrationTest extends CommandLineProgramTest {
         Assert.assertEquals(genotype.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY), "fixture_phase");
         Assert.assertEquals(genotype.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY), "1|0");
         Assert.assertEquals(genotype.getDP(), 16);
+    }
+
+    @Test
+    public void testNativeExtraUncalledAltPreservesDeletionPhaseThroughGenotyping() {
+        final List<Map<Integer, VariantContext>> stages = runNativePhaseFixture("native-extra-alt", "fabricated:40-120");
+        final VariantContext caller = stages.get(0).get(61);
+        final VariantContext finalCall = stages.get(1).get(61);
+        final Genotype before = caller.getGenotype(0);
+        final Genotype after = finalCall.getGenotype(0);
+        Assert.assertEquals(caller.getReference().getBaseString(), "GAAGTCC");
+        Assert.assertEquals(caller.getAlternateAlleles(), List.of(Allele.create("G"), Allele.create("GC"), Allele.NON_REF_ALLELE));
+        Assert.assertFalse(before.getAlleles().contains(Allele.create("GC")));
+        Assert.assertEquals(finalCall.getAlternateAlleles(), List.of(Allele.create("G")));
+        Assert.assertEquals(before.getAlleles(), after.getAlleles());
+        Assert.assertEquals(Collections.frequency(after.getAlleles(), Allele.create("G")), 1);
+        Assert.assertEquals(phaseCopy(before, Allele.create("G")), phaseCopy(after, Allele.create("G")));
+        Assert.assertEquals(before.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY), "55_G_A");
+        Assert.assertNotNull(before.getExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+        for (final String key : List.of(VCFConstants.PHASE_SET_KEY,
+                GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY,
+                GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY)) {
+            Assert.assertEquals(after.getExtendedAttribute(key), before.getExtendedAttribute(key), key);
+        }
+        final String physical = String.valueOf(after.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY));
+        Assert.assertEquals(physical.charAt(phaseCopy(after, Allele.create("G")) * 2), '1');
+        Assert.assertEquals(stages.get(0).get(55).getGenotype(0).getExtendedAttribute(VCFConstants.PHASE_SET_KEY),
+                before.getExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+    }
+
+    @Test
+    public void testNativeCalledAStarPhaseWithUncalledPaddedAGAlt() {
+        final List<Map<Integer, VariantContext>> stages = runNativePhaseFixture("native-padded-a", "fabricated:130-195");
+        final VariantContext caller = stages.get(0).get(160);
+        final VariantContext callerChild = stages.get(0).get(163);
+        final VariantContext finalCall = stages.get(1).get(160);
+        final VariantContext finalChild = stages.get(1).get(163);
+        final Genotype parentBefore = caller.getGenotype(0);
+        final Genotype childBefore = callerChild.getGenotype(0);
+        final Genotype parentAfter = finalCall.getGenotype(0);
+        final Genotype childAfter = finalChild.getGenotype(0);
+        Assert.assertEquals(caller.getReference().getBaseString(), "ATCG");
+        Assert.assertEquals(caller.getAlternateAlleles(), List.of(Allele.create("A"), Allele.create("AG"), Allele.NON_REF_ALLELE));
+        Assert.assertFalse(parentBefore.getAlleles().contains(Allele.create("AG")));
+        Assert.assertEquals(parentBefore.getAlleles(), List.of(caller.getReference(), Allele.create("A")));
+        Assert.assertEquals(finalCall.getAlternateAlleles().size(), 1);
+        final Allele finalDeletion = finalCall.getAlternateAllele(0);
+        final String ref = finalCall.getReference().getBaseString();
+        final String alt = finalDeletion.getBaseString();
+        int prefix = 0;
+        while (prefix < ref.length() && prefix < alt.length() && ref.charAt(prefix) == alt.charAt(prefix)) {
+            prefix++;
+        }
+        int suffix = 0;
+        while (suffix < ref.length() - prefix && suffix < alt.length() - prefix
+                && ref.charAt(ref.length() - suffix - 1) == alt.charAt(alt.length() - suffix - 1)) {
+            suffix++;
+        }
+        Assert.assertEquals(finalCall.getStart() + prefix, 161);
+        Assert.assertEquals(ref.substring(prefix, ref.length() - suffix), "TCG");
+        Assert.assertEquals(alt.substring(prefix, alt.length() - suffix), "");
+        Assert.assertEquals(Collections.frequency(parentAfter.getAlleles(), finalDeletion), 1);
+        Assert.assertEquals(phaseCopy(parentBefore, Allele.create("A")), phaseCopy(childBefore, Allele.SPAN_DEL));
+        Assert.assertEquals(phaseCopy(parentAfter, finalDeletion), phaseCopy(childAfter, Allele.SPAN_DEL));
+        Assert.assertNotNull(parentBefore.getExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+        Assert.assertEquals(parentBefore.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY),
+                "160_ATCG_A");
+        Assert.assertEquals(parentBefore.getExtendedAttribute(VCFConstants.PHASE_SET_KEY),
+                childBefore.getExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+        Assert.assertEquals(parentBefore.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY),
+                childBefore.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY));
+        Assert.assertEquals(parentAfter.getExtendedAttribute(VCFConstants.PHASE_SET_KEY),
+                childAfter.getExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+        Assert.assertEquals(parentAfter.getExtendedAttribute(VCFConstants.PHASE_SET_KEY),
+                parentBefore.getExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+        Assert.assertEquals(parentAfter.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY),
+                parentBefore.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY));
+        Assert.assertEquals(parentAfter.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY),
+                parentBefore.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY));
+        Assert.assertEquals(childAfter.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY),
+                childBefore.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY));
+        final String parentPhysical = String.valueOf(parentAfter.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY));
+        Assert.assertEquals(parentPhysical.charAt(phaseCopy(parentAfter, finalDeletion) * 2), '1');
+    }
+
+    private List<Map<Integer, VariantContext>> runNativePhaseFixture(final String fixture, final String interval) {
+        final File reference = getTestFile(fixture + ".fa");
+        final File gvcf = createTempFile(fixture, ".g.vcf");
+        final ArgumentsBuilder caller = new ArgumentsBuilder().addReference(reference)
+                .addInput(getTestFile(fixture + ".bam")).add("L", interval).addOutput(gvcf)
+                .add("ERC", "GVCF").add("native-pair-hmm-threads", 1)
+                .add("create-output-variant-index", true)
+                .add("add-output-vcf-command-line", false);
+        runCommandLine(caller.getArgsList(), "HaplotypeCaller");
+        final Map<Integer, VariantContext> callerRows = indexedNativeRows(gvcf);
+        final File vcf = createTempFile(fixture, ".vcf");
+        final ArgumentsBuilder genotype = new ArgumentsBuilder().addReference(reference).addVCF(gvcf)
+                .addOutput(vcf).add("create-output-variant-index", true);
+        runCommandLine(genotype);
+        return List.of(callerRows, indexedNativeRows(vcf));
+    }
+
+    private Map<Integer, VariantContext> indexedNativeRows(final File file) {
+        try (final VCFFileReader reader = new VCFFileReader(file, true)) {
+            final List<VariantContext> sequential = new ArrayList<>();
+            reader.iterator().forEachRemaining(sequential::add);
+            final List<VariantContext> indexed = new ArrayList<>();
+            reader.query("fabricated", 1, 240).forEachRemaining(indexed::add);
+            Assert.assertEquals(indexed.stream().map(VariantContext::toString).collect(Collectors.toList()),
+                    sequential.stream().map(VariantContext::toString).collect(Collectors.toList()));
+            return sequential.stream().filter(vc -> !vc.getAlternateAlleles().equals(List.of(Allele.NON_REF_ALLELE)))
+                    .collect(Collectors.toMap(VariantContext::getStart, vc -> vc));
+        }
+    }
+
+    private int phaseCopy(final Genotype genotype, final Allele allele) {
+        Assert.assertTrue(genotype.isPhased());
+        Assert.assertEquals(Collections.frequency(genotype.getAlleles(), allele), 1);
+        return genotype.getAlleles().indexOf(allele);
     }
 
     @Test
