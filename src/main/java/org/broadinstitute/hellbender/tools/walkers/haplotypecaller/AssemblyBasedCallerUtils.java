@@ -739,6 +739,7 @@ public final class AssemblyBasedCallerUtils {
 
         // we want to establish (potential) *groups* of phased variants, so we need to be smart when looking at pairwise phasing partners
         final List<VariantContext> phased = constructPhaseGroups(calls, phaseSetMapping, uniqueCounterEndValue);
+        final Set<Integer> invalidGroups = new HashSet<>();
         for (int i = 0; i < calls.size(); i++) {
             final VariantContext child = calls.get(i);
             final Pair<VariantContext, Boolean> link = spanningDeletionParents.get(child);
@@ -747,9 +748,16 @@ public final class AssemblyBasedCallerUtils {
                 final Pair<Integer, PhaseGroup> parentPhase = phaseSetMapping.get(link.getLeft());
                 if (parentPhase == null || !parentPhase.getLeft().equals(childPhase.getLeft())
                         || parentPhase.getRight().equals(childPhase.getRight()) != link.getRight()) {
-                    phased.set(i, child);
-                    phaseSetMapping.remove(child);
+                    invalidGroups.add(childPhase.getLeft());
                 }
+            }
+        }
+        for (int i = 0; i < calls.size(); i++) {
+            final VariantContext call = calls.get(i);
+            final Pair<Integer, PhaseGroup> phase = phaseSetMapping.get(call);
+            if (phase != null && invalidGroups.contains(phase.getLeft())) {
+                phased.set(i, call);
+                phaseSetMapping.remove(call);
             }
         }
         removeUnsupportedDeletionGroups(calls, calledHaplotypes, haplotypeMap, phaseSetMapping, spanningDeletionParents, phased);

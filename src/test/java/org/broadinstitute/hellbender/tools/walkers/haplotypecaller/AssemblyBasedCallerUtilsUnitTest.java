@@ -1679,6 +1679,57 @@ public class AssemblyBasedCallerUtilsUnitTest extends GATKBaseTest {
     }
 
     @Test
+    public void testRejectConflictingDeletionLinkForWholeGroup() {
+        final VariantContext ordinary = phasingCall(5,
+                List.of(Allele.create("C", true), Allele.create("T")), 0, 1);
+        final Allele firstDeletion = Allele.create("A");
+        final VariantContext parent = phasingCall(10,
+                List.of(Allele.create("AGTCCT", true), firstDeletion), 0, 1);
+        final Allele middleDeletion = Allele.create("T");
+        final VariantContext middle = phasingCall(12,
+                List.of(Allele.create("TCCTAGC", true), middleDeletion, Allele.SPAN_DEL), 2, 1);
+        final VariantContext child = phasingCall(16,
+                List.of(Allele.create("A", true), Allele.create("G"), Allele.SPAN_DEL), 1, 2);
+        final VariantContext independentOne = phasingCall(25,
+                List.of(Allele.create("G", true), Allele.create("A")), 0, 1);
+        final VariantContext independentTwo = phasingCall(30,
+                List.of(Allele.create("T", true), Allele.create("C")), 0, 1);
+
+        final Haplotype firstCopy = phasingHaplotype("GACGTC", vcToEvent(parent),
+                new Event(child.getContig(), child.getStart(), child.getReference(), child.getAlternateAllele(0)));
+        final Haplotype secondCopy = phasingHaplotype("GACGTA", vcToEvent(ordinary),
+                new Event(middle.getContig(), middle.getStart(), middle.getReference(), middleDeletion));
+        final Haplotype independentCopy = phasingHaplotype("GACGTG",
+                vcToEvent(independentOne), vcToEvent(independentTwo));
+        final List<VariantContext> calls = List.of(ordinary, parent, middle, child, independentOne, independentTwo);
+        final List<VariantContext> phased = phaseCalls(calls, Set.of(firstCopy, secondCopy, independentCopy));
+        assertOnlyPhaseChanged(phased, calls);
+
+        // The parent/middle link is coherent, and the unrelated group remains independent.
+        assertDeletionAndStarInPhase(phased.get(1).getGenotype(0), phased.get(2).getGenotype(0), firstDeletion);
+        final Genotype independentFirstGT = phased.get(4).getGenotype(0);
+        final Genotype independentSecondGT = phased.get(5).getGenotype(0);
+        Assert.assertTrue(independentFirstGT.isPhased() && independentSecondGT.isPhased());
+        Assert.assertEquals(independentFirstGT.getExtendedAttribute(VCFConstants.PHASE_SET_KEY),
+                independentSecondGT.getExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+        Assert.assertNotEquals(independentFirstGT.getExtendedAttribute(VCFConstants.PHASE_SET_KEY),
+                phased.get(1).getGenotype(0).getExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+
+        // The child was provisionally grouped with ordinary, but its deletion parent is in another group.
+        for (final int index : List.of(0, 3)) {
+            final Genotype actual = phased.get(index).getGenotype(0);
+            Assert.assertFalse(actual.isPhased(), "An invalid link must not leave a singleton phased call: PS="
+                    + actual.getExtendedAttribute(VCFConstants.PHASE_SET_KEY) + " PID="
+                    + actual.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY) + " PGT="
+                    + actual.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY));
+            Assert.assertEquals(actual.getAlleles(), calls.get(index).getGenotype(0).getAlleles());
+            Assert.assertFalse(actual.hasExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+            Assert.assertFalse(actual.hasExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY));
+            Assert.assertFalse(actual.hasExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY));
+        }
+    }
+
+    @Test
     public void testMissingStarGenotypeDoesNotAcquirePhase() {
         final Allele parentRef = Allele.create("ACCG", true);
         final Allele deletion = Allele.create("A");
