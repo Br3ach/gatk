@@ -2533,6 +2533,65 @@ public class AssemblyBasedCallerUtilsUnitTest extends GATKBaseTest {
     }
 
     @Test
+    public void testMissingOnlySupportCannotCreateOppositeCopySnpPhase() {
+        final VariantContext first = phasingCall(100,
+                List.of(Allele.create("C", true), Allele.create("T")), 0, 1);
+        final VariantContext second = phasingCall(110,
+                List.of(Allele.create("G", true), Allele.create("A")), 0, 1);
+        final VariantContext calledThird = phasingCall(120,
+                List.of(Allele.create("A", true), Allele.create("C")), 0, 1);
+        final VariantContext missing = new VariantContextBuilder(calledThird).genotypes(
+                new GenotypeBuilder(calledThird.getGenotype(0))
+                        .alleles(List.of(Allele.NO_CALL, Allele.NO_CALL)).make()).make();
+        final Haplotype firstAlt = phasingHaplotype("CTG",
+                vcToEvent(first), new Event("1", 110, second.getReference(), Allele.create("C")));
+        final Haplotype secondAlt = phasingHaplotype("CAG", vcToEvent(second));
+        final Haplotype missingAlt = phasingHaplotype("GAC", vcToEvent(calledThird));
+        final List<VariantContext> calls = List.of(first, second, missing);
+        final Set<Haplotype> haplotypes = Set.of(firstAlt, secondAlt, missingAlt);
+        final Map<VariantContext, Set<Haplotype>> support = constructHaplotypeMapping(calls, haplotypes);
+        Assert.assertEquals(support.get(first), Set.of(firstAlt));
+        Assert.assertEquals(support.get(second), Set.of(secondAlt));
+        Assert.assertFalse(createAlleleMapper(second, second.getStart(), new ArrayList<>(haplotypes), true)
+                .getOrDefault(second.getReference(), Collections.emptyList()).contains(firstAlt));
+        final List<VariantContext> phased = phaseCalls(calls, haplotypes);
+        Assert.assertTrue(support.get(missing).isEmpty());
+        assertOnlyPhaseChanged(phased, calls);
+        for (final VariantContext call : phased) {
+            final Genotype gt = call.getGenotype(0);
+            Assert.assertFalse(gt.isPhased(), "A different ALT is not REF support on the proposed copy: " + gt);
+            Assert.assertFalse(gt.hasExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+            Assert.assertFalse(gt.hasExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY));
+            Assert.assertFalse(gt.hasExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY));
+        }
+
+        final Haplotype coherentFirst = phasingHaplotype("CTG", vcToEvent(first));
+        Assert.assertTrue(createAlleleMapper(second, second.getStart(), List.of(coherentFirst, secondAlt), true)
+                .getOrDefault(second.getReference(), Collections.emptyList()).contains(coherentFirst));
+        final List<VariantContext> positive = phaseCalls(calls, Set.of(coherentFirst, secondAlt));
+        final Genotype firstGT = positive.get(0).getGenotype(0);
+        final Genotype secondGT = positive.get(1).getGenotype(0);
+        Assert.assertTrue(firstGT.isPhased() && secondGT.isPhased());
+        Assert.assertEquals(firstGT.getExtendedAttribute(VCFConstants.PHASE_SET_KEY),
+                secondGT.getExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+        Assert.assertNotEquals(firstGT.getAlleles().indexOf(first.getAlternateAllele(0)),
+                secondGT.getAlleles().indexOf(second.getAlternateAllele(0)));
+        Assert.assertFalse(positive.get(2).getGenotype(0).isPhased());
+
+        final Haplotype cisAlt = phasingHaplotype("TAC", vcToEvent(first), vcToEvent(second));
+        final Haplotype cisRef = phasingHaplotype("CGA");
+        final List<VariantContext> cis = phaseCalls(calls, Set.of(cisAlt, cisRef));
+        final Genotype cisFirst = cis.get(0).getGenotype(0);
+        final Genotype cisSecond = cis.get(1).getGenotype(0);
+        Assert.assertTrue(cisFirst.isPhased() && cisSecond.isPhased());
+        Assert.assertEquals(cisFirst.getExtendedAttribute(VCFConstants.PHASE_SET_KEY),
+                cisSecond.getExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+        Assert.assertEquals(cisFirst.getAlleles().indexOf(first.getAlternateAllele(0)),
+                cisSecond.getAlleles().indexOf(second.getAlternateAllele(0)));
+        Assert.assertFalse(cis.get(2).getGenotype(0).isPhased());
+    }
+
+    @Test
     public void testHomRefHomVarComparisonRemainsEligible() {
         // Preserve the legacy comparison boundary. These fabricated haplotypes are not a dosage model.
         final VariantContext homRef = phasingCall(100,

@@ -765,8 +765,8 @@ public final class AssemblyBasedCallerUtils {
         return phased;
     }
 
-    // Check both copies of ALT/ALT deletion groups and deletion-linked phase sets across the whole group.
-    // Check REF/deletion links to ordinary variants against their own two called copies below.
+    // Check both copies of concrete heterozygous and deletion-linked phase sets across the whole group.
+    // Disjoint ALT support alone does not establish REF support at the partner call.
     private static void removeUnsupportedDeletionGroups(final List<VariantContext> calls,
             final Set<Haplotype> calledHaplotypes,
             final Map<VariantContext, Set<Haplotype>> haplotypeMap,
@@ -780,7 +780,9 @@ public final class AssemblyBasedCallerUtils {
                 linkedGroups.add(phase.getLeft());
             }
             final Genotype g = call.getNSamples() == 1 ? call.getGenotype(0) : null;
-            if (g != null && !g.getAlleles().contains(call.getReference()) && getCalledDeletionForPhasing(call, g) != null) {
+            if (g != null && ((!g.getAlleles().contains(call.getReference()) && getCalledDeletionForPhasing(call, g) != null)
+                    || (g.getPloidy() == 2 && g.isHet()
+                    && g.getAlleles().stream().allMatch(a -> a.isCalled() && !a.isSymbolic())))) {
                 copySupport.computeIfAbsent(phase.getLeft(),
                         key -> List.of(new HashSet<>(calledHaplotypes), new HashSet<>(calledHaplotypes)));
             }

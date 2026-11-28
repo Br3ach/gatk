@@ -720,6 +720,81 @@ public class GenotypeGVCFsIntegrationTest extends CommandLineProgramTest {
     }
 
     @Test
+    public void testSomaticGenotypingRetainsRelativePhaseWhenCallsAreUnchanged() throws IOException {
+        final String template = Files.readString(getTestFile("single-sample-phase.g.vcf").toPath());
+        final String header = template.substring(0, template.indexOf("#CHROM"))
+                + "##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">\n"
+                + "##FORMAT=<ID=AD,Number=R,Type=Integer,Description=\"Allelic depths\">\n"
+                + "##FORMAT=<ID=AF,Number=A,Type=Float,Description=\"Allele fraction\">\n"
+                + "##FORMAT=<ID=SQ,Number=A,Type=Float,Description=\"Somatic quality\">\n"
+                + "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tfabricated\n";
+        final String format = "GT:AD:AF:DP:PGT:PID:PS:SQ";
+        final File input = createTempFile("somaticPhase", ".g.vcf");
+        Files.writeString(input.toPath(), header
+                + "fixture\t100\t.\tATCG\tA,AG,<NON_REF>\t.\t.\tDP=20\t" + format
+                + "\t2|0:10,0,10,0:0.0,0.5,0.0:20:1|0:group100:100:0,30,0\n"
+                + "fixture\t140\t.\tA\tC,<NON_REF>\t.\t.\tDP=20\t" + format
+                + "\t1|0:10,10,0:0.5,0.0:20:1|0:group140:140:30,0\n"
+                + "fixture\t150\t.\tA\tG,<NON_REF>\t.\t.\tDP=20\t" + format
+                + "\t0|1:10,10,0:0.5,0.0:20:0|1:group140:140:30,0\n"
+                + "fixture\t170\t.\tA\tC,G,<NON_REF>\t.\t.\tDP=20\t" + format
+                + "\t1|0:10,2,8,0:0.1,0.4,0.0:20:1|0:group170:170:0,30,0\n");
+        final File output = createTempFile("somaticPhase", ".vcf");
+        runCommandLine(new ArgumentsBuilder().addReference(getTestFile("single-sample-phase.fa"))
+                .addVCF(input).addOutput(output).add(CombineGVCFs.SOMATIC_INPUT_LONG_NAME, true));
+        final Map<Integer, VariantContext> calls = VariantContextTestUtils.getVariantContexts(output).stream()
+                .collect(Collectors.toMap(VariantContext::getStart, vc -> vc));
+        Assert.assertEquals(calls.keySet(), Set.of(100, 140, 150, 170));
+        final Genotype first = calls.get(140).getGenotype(0);
+        final Genotype second = calls.get(150).getGenotype(0);
+        Assert.assertTrue(first.isPhased() && second.isPhased());
+        Assert.assertEquals(first.getAlleles(), List.of(calls.get(140).getAlternateAllele(0), calls.get(140).getReference()));
+        Assert.assertEquals(second.getAlleles(), List.of(calls.get(150).getReference(), calls.get(150).getAlternateAllele(0)));
+        Assert.assertEquals(first.getExtendedAttribute(VCFConstants.PHASE_SET_KEY),
+                second.getExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+        Assert.assertEquals(first.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY),
+                second.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY));
+        Assert.assertNotEquals(first.getAlleles().indexOf(calls.get(140).getAlternateAllele(0)),
+                second.getAlleles().indexOf(calls.get(150).getAlternateAllele(0)),
+                "The two called ALTs must remain on opposite copies");
+        Assert.assertEquals(first.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY), "1|0");
+        Assert.assertEquals(second.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY), "0|1");
+        for (final Genotype gt : List.of(first, second)) {
+            Assert.assertEquals(gt.getAD(), new int[] {10, 10});
+            Assert.assertEquals(gt.getDP(), 20);
+            Assert.assertEquals(VariantContextGetters.getAttributeAsDoubleArray(gt, "AF", () -> null, 0.0)[0], 0.5, 0.001);
+            Assert.assertEquals(VariantContextGetters.getAttributeAsDoubleArray(gt, "SQ", () -> null, 0.0)[0], 30.0, 0.001);
+        }
+
+        final VariantContext pruned = calls.get(100);
+        final Genotype prunedGT = pruned.getGenotype(0);
+        Assert.assertEquals(pruned.getReference(), Allele.create("ATC", true));
+        Assert.assertEquals(pruned.getAlternateAlleles(), List.of(Allele.create("A")));
+        Assert.assertEquals(prunedGT.getAlleles(), List.of(Allele.create("A"), pruned.getReference()));
+        Assert.assertTrue(prunedGT.isPhased());
+        Assert.assertEquals(prunedGT.getExtendedAttribute(VCFConstants.PHASE_SET_KEY).toString(), "100");
+        Assert.assertEquals(prunedGT.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY), "group100");
+        Assert.assertEquals(prunedGT.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY), "1|0");
+        Assert.assertEquals(prunedGT.getAD(), new int[] {10, 10});
+        Assert.assertEquals(prunedGT.getDP(), 20);
+        Assert.assertEquals(VariantContextGetters.getAttributeAsDoubleArray(prunedGT, "AF", () -> null, 0.0)[0], 0.5, 0.001);
+        Assert.assertEquals(VariantContextGetters.getAttributeAsDoubleArray(prunedGT, "SQ", () -> null, 0.0)[0], 30.0, 0.001);
+
+        final VariantContext changed = calls.get(170);
+        final Genotype changedGT = changed.getGenotype(0);
+        Assert.assertEquals(changed.getAlternateAlleles(), List.of(Allele.create("G")));
+        Assert.assertEquals(changedGT.getAlleles(), List.of(changed.getReference(), Allele.create("G")));
+        Assert.assertFalse(changedGT.isPhased());
+        Assert.assertFalse(changedGT.hasExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+        Assert.assertFalse(changedGT.hasExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY));
+        Assert.assertFalse(changedGT.hasExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY));
+        Assert.assertEquals(changedGT.getAD(), new int[] {10, 8});
+        Assert.assertEquals(changedGT.getDP(), 20);
+        Assert.assertEquals(VariantContextGetters.getAttributeAsDoubleArray(changedGT, "AF", () -> null, 0.0)[0], 0.4, 0.001);
+        Assert.assertEquals(VariantContextGetters.getAttributeAsDoubleArray(changedGT, "SQ", () -> null, 0.0)[0], 30.0, 0.001);
+    }
+
+    @Test
     public void testThreeDragenMtSamples() throws IOException {
         final File output = createTempFile("tmp", ".vcf");
         ArgumentsBuilder args =   new ArgumentsBuilder()

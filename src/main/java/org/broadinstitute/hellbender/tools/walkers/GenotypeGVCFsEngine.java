@@ -136,7 +136,7 @@ public class GenotypeGVCFsEngine
         final VariantContext mergedVC = merger.merge(variantsToProcess, loc, ref.getBase(), true, false);
         final VariantContext phaseSource = variantsToProcess.size() == 1 && variantsToProcess.get(0).getStart() == loc.getStart()
                 ? variantsToProcess.get(0) : null;
-        final VariantContext regenotypedVC = somaticInput ? regenotypeSomaticVC(mergedVC, ref, features, outputNonVariants, tlodThreshold, sqThreshold, afTolerance) :
+        final VariantContext regenotypedVC = somaticInput ? regenotypeSomaticVC(mergedVC, ref, features, outputNonVariants, tlodThreshold, sqThreshold, afTolerance, phaseSource) :
                 regenotypeVC(mergedVC, ref, features, outputNonVariants, phaseSource);
 
         return regenotypedVC;
@@ -354,12 +354,12 @@ public class GenotypeGVCFsEngine
      * Re-genotype (and re-annotate) a combined genomic VC
      * @return a new VariantContext or null if the site turned monomorphic and we don't want such sites
      */
-    private VariantContext regenotypeSomaticVC(final VariantContext originalVC, final ReferenceContext ref, final FeatureContext features, boolean includeNonVariants, double tlodThreshold, double sqThreshold, double afTolerance) {
+    private VariantContext regenotypeSomaticVC(final VariantContext originalVC, final ReferenceContext ref, final FeatureContext features, boolean includeNonVariants, double tlodThreshold, double sqThreshold, double afTolerance, final VariantContext phaseSource) {
         Utils.nonNull(originalVC);
 
         final VariantContext result;
         if ( originalVC.isVariant()  && originalVC.getAttributeAsInt(VCFConstants.DEPTH_KEY,0) > 0 ) {
-            result = callSomaticGenotypes(originalVC, tlodThreshold, sqThreshold, afTolerance);
+            result = callSomaticGenotypes(originalVC, tlodThreshold, sqThreshold, afTolerance, phaseSource);
         } else if (includeNonVariants) {
             result = originalVC;
         } else {
@@ -375,7 +375,8 @@ public class GenotypeGVCFsEngine
      * @param vc input VariantContext with no-called genotypes
      * @return a VC with called genotypes and low quality alleles removed, may be null
      */
-    private VariantContext callSomaticGenotypes(final VariantContext vc, double tlodThreshold, double sqThreshold, double afTolerance) {
+    private VariantContext callSomaticGenotypes(final VariantContext vc, double tlodThreshold, double sqThreshold, double afTolerance,
+                                               final VariantContext phaseSource) {
         final List<Genotype> newGenotypes = new ArrayList<>();
         final GenotypesContext genotypes = vc.getGenotypes();
         final double[] perAlleleLikelihoodSums = new double[vc.getAlleles().size()];  //needs the ref for the subsetting utils
@@ -435,7 +436,7 @@ public class GenotypeGVCFsEngine
 
         //if we didn't drop alleles then we're done!
         if (allelesToKeep.size() == regenotypedVC.getAlleles().size()) {
-            return regenotypedVC;
+            return restoreSingleSamplePhase(regenotypedVC, regenotypedVC.getAlleles(), phaseSource);
         }
 
         final int[] relevantIndices = allelesToKeep.stream().mapToInt(a -> regenotypedVC.getAlleles().indexOf(a)).toArray();
@@ -443,7 +444,8 @@ public class GenotypeGVCFsEngine
         //do another pass over genotypes to drop the alleles that aren't called
         final GenotypesContext reducedGenotypes = AlleleSubsettingUtils.subsetSomaticAlleles(outputHeader, regenotypedVC.getGenotypes(), allelesToKeep, relevantIndices);
         final VariantContext subsetVC = builder.alleles(allelesToKeep).genotypes(reducedGenotypes).make();
-        final VariantContext trimmedVC = GATKVariantContextUtils.trimAlleles(subsetVC, true, true);
+        final VariantContext phasedSubset = restoreSingleSamplePhase(subsetVC, allelesToKeep, phaseSource);
+        final VariantContext trimmedVC = GATKVariantContextUtils.trimAlleles(phasedSubset, true, true);
         if (GATKVariantContextUtils.isProperlyPolymorphic(trimmedVC)) {
             return trimmedVC;
         }
