@@ -1271,7 +1271,8 @@ public class GenotypeGVCFsIntegrationTest extends CommandLineProgramTest {
         Assert.assertTrue(source.contains(original));
         final File reference = getTestFile("single-sample-phase.fa");
         for (final String sample : List.of("GT:DP:GQ:PL\t1:24:80:90,0,100",
-                "GT:DP:GQ:PGT:PID:PL\t1:24:80:1:haploid_phase:90,0,100")) {
+                "GT:DP:GQ:PGT:PID:PL\t1:24:80:1:haploid_phase:90,0,100",
+                "GT:DP:GQ:PGT:PID:PL\t1:24:80:0|1:haploid_phase:90,0,100")) {
             final File input = createTempFile("haploidPhysicalPhase", ".g.vcf");
             Files.writeString(input.toPath(), source.replace(original, sample));
             final File output = createTempFile("haploidPhysicalPhase", ".vcf");
@@ -1284,8 +1285,10 @@ public class GenotypeGVCFsIntegrationTest extends CommandLineProgramTest {
             Assert.assertEquals(gt.getGQ(), 90);
             Assert.assertEquals(gt.getAD(), new int[] {24, 0});
             Assert.assertEquals(gt.getPL(), new int[] {90, 0});
-            Assert.assertFalse(gt.hasExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY));
-            Assert.assertFalse(gt.hasExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY));
+            Assert.assertFalse(gt.isPhased(), gt.toString());
+            Assert.assertFalse(gt.hasExtendedAttribute(VCFConstants.PHASE_SET_KEY), gt.toString());
+            Assert.assertFalse(gt.hasExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY), gt.toString());
+            Assert.assertFalse(gt.hasExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY), gt.toString());
         }
     }
 

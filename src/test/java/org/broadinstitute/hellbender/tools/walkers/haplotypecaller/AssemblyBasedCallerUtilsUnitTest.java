@@ -2414,6 +2414,74 @@ public class AssemblyBasedCallerUtilsUnitTest extends GATKBaseTest {
         Assert.assertFalse(uncalledGT.isPhased(), "An uncalled ALT must not join indirectly through the bridge");
     }
 
+    @DataProvider
+    public Object[][] homVarBridgeOrders() {
+        return new Object[][] {{true}, {false}};
+    }
+
+    @Test(dataProvider = "homVarBridgeOrders")
+    public void testHomVarBridgeDoesNotEraseSupportedSpanningDeletionPhase(final boolean forcedFirst) {
+        final Allele deletion = Allele.create("A");
+        final VariantContext forced = phasingCall(forcedFirst ? 80 : 110,
+                List.of(Allele.create("C", true), Allele.create("T")), 0, 0);
+        final VariantContext bridge = phasingCall(90, List.of(Allele.create("G", true), Allele.create("A")), 1, 1);
+        final VariantContext parent = phasingCall(100, List.of(Allele.create("ACCG", true), deletion), 0, 1);
+        final VariantContext child = phasingCall(102, List.of(Allele.create("C", true), Allele.create("T"),
+                Allele.SPAN_DEL), 1, 2);
+        final Haplotype deleted = phasingHaplotype("GTAAACT", vcToEvent(forced), vcToEvent(bridge), vcToEvent(parent));
+        final Haplotype intact = phasingHaplotype("GAAAACGT", vcToEvent(bridge),
+                new Event(child.getContig(), child.getStart(), child.getReference(), child.getAlternateAllele(0)));
+        final Set<Haplotype> haplotypes = Set.of(deleted, intact);
+        final List<VariantContext> control = phaseCalls(List.of(bridge, parent, child), haplotypes);
+        assertDeletionAndStarInPhase(control.get(1).getGenotype(0), control.get(2).getGenotype(0), deletion);
+
+        final List<VariantContext> calls = forcedFirst ? List.of(forced, bridge, parent, child)
+                : List.of(bridge, parent, child, forced);
+        final List<VariantContext> phased = phaseCalls(calls, haplotypes);
+        assertOnlyPhaseChanged(phased, calls);
+        final Genotype phasedParent = phased.get(calls.indexOf(parent)).getGenotype(0);
+        final Genotype phasedChild = phased.get(calls.indexOf(child)).getGenotype(0);
+        assertDeletionAndStarInPhase(phasedParent, phasedChild, deletion);
+        Assert.assertFalse(phasedParent.getAllele(0).equals(deletion));
+        final Genotype forcedGT = phased.get(calls.indexOf(forced)).getGenotype(0);
+        Assert.assertNotEquals(forcedGT.getExtendedAttribute(VCFConstants.PHASE_SET_KEY),
+                phasedParent.getExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+    }
+
+    @Test
+    public void testPartialReferenceCallCannotPhaseThroughUncalledSnp() {
+        final Allele deletion = Allele.create("CA");
+        final VariantContext parent = phasingCall(100, List.of(Allele.create("CAA", true), deletion,
+                Allele.create("CAAA")), 0, 1);
+        final VariantContext called = phasingCall(105, List.of(Allele.create("C", true), Allele.create("T")), 0, 1);
+        final Haplotype deleted = phasingHaplotype("GCAAACG",
+                new Event(parent.getContig(), parent.getStart(), parent.getReference(), deletion), vcToEvent(called));
+        final Haplotype intact = phasingHaplotype("GCAAACGT");
+        final Set<Haplotype> haplotypes = Set.of(deleted, intact);
+        final List<VariantContext> control = phaseCalls(List.of(parent, called), haplotypes);
+        final Genotype phasedParent = control.get(0).getGenotype(0);
+        final Genotype phasedSnp = control.get(1).getGenotype(0);
+        Assert.assertTrue(phasedParent.isPhased() && phasedSnp.isPhased());
+        Assert.assertEquals(phasedSnp.getExtendedAttribute(VCFConstants.PHASE_SET_KEY),
+                phasedParent.getExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+        Assert.assertEquals(phasedSnp.getAlleles().indexOf(called.getAlternateAllele(0)),
+                phasedParent.getAlleles().indexOf(deletion));
+
+        final List<Allele> partialAlleles = List.of(called.getReference(), Allele.NO_CALL);
+        final VariantContext partial = new VariantContextBuilder(called)
+                .genotypes(new GenotypeBuilder(called.getGenotype(0)).alleles(partialAlleles).make()).make();
+        final List<VariantContext> calls = List.of(parent, partial);
+        final List<VariantContext> phased = phaseCalls(calls, haplotypes);
+        final Genotype actual = phased.get(1).getGenotype(0);
+        final Set<Haplotype> support = constructHaplotypeMapping(calls, haplotypes).get(partial);
+        Assert.assertFalse(actual.isPhased(), actual + ", uncalled SNP supports phase: " + support.equals(Set.of(deleted)));
+        Assert.assertTrue(support.isEmpty());
+        Assert.assertEquals(actual.getAlleles(), partialAlleles);
+        Assert.assertFalse(actual.hasExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+        Assert.assertFalse(actual.hasExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY));
+        Assert.assertFalse(actual.hasExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY));
+    }
+
     @Test
     public void testHomRefHomVarComparisonRemainsEligible() {
         // Preserve the legacy comparison boundary. These fabricated haplotypes are not a dosage model.

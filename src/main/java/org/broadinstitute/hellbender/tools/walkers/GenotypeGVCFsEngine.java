@@ -260,6 +260,9 @@ public class GenotypeGVCFsEngine
     }
 
     private static String mapPhysicalPhase(final VariantContext source, final Genotype before, final String pgt) {
+        if (before.getPloidy() != 2) {
+            return null;
+        }
         final List<Allele> siteAlts = source.getAlternateAlleles().stream()
                 .filter(a -> !a.isSymbolic() && !a.equals(Allele.SPAN_DEL))
                 .filter(before.getAlleles()::contains).collect(Collectors.toList());
@@ -268,7 +271,7 @@ public class GenotypeGVCFsEngine
         }
         // Physical phase describes the site-specific ALT. A spanning deletion counts as 0 here.
         if (pgt.equals("0|1") || pgt.equals("1|0") || pgt.equals("1|1")) {
-            if (before.getPloidy() == 2 && before.isHet()) {
+            if (before.isHet()) {
                 final Allele alt = siteAlts.get(0);
                 final String expected = (before.getAllele(0).equals(alt) ? "1" : "0") + "|"
                         + (before.getAllele(1).equals(alt) ? "1" : "0");
@@ -283,7 +286,7 @@ public class GenotypeGVCFsEngine
             }
             return pgt;
         }
-        if (before.getPloidy() != 2 || !before.isPhased()) {
+        if (!before.isPhased()) {
             return null;
         }
         final Allele left = before.getAllele(0);

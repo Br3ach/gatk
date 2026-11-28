@@ -879,8 +879,8 @@ public final class AssemblyBasedCallerUtils {
         final Map<VariantContext, Set<Haplotype>> haplotypeMap = new HashMap<>(originalCalls.size());
         for ( final VariantContext call : originalCalls ) {
             final Genotype genotype = call.getNSamples() == 1 ? call.getGenotype(0) : null;
-            // A partial spanning-deletion call cannot inherit phase from an uncalled site ALT.
-            if (genotype != null && genotype.isMixed() && genotype.getAlleles().contains(Allele.SPAN_DEL)) {
+            // A partial call cannot inherit phase from an uncalled site ALT.
+            if (genotype != null && genotype.isMixed()) {
                 haplotypeMap.put(call, Collections.emptySet());
                 continue;
             }
@@ -1081,6 +1081,8 @@ public final class AssemblyBasedCallerUtils {
         final int totalAvailableHaplotypes = haplotypesWithCalledVariants.size();
 
         final Map<VariantContext, Pair<Integer, PhaseGroup>> phaseSetMapping = new HashMap<>(haplotypeMap.size());
+        // Only HOM_REF and HET constrain membership. A homozygous ALT call can join either type of group.
+        final Map<Integer, GenotypeType> constrainedGroupTypes = new HashMap<>();
 
         final int numCalls = originalCalls.size();
         int uniqueCounter = 0;
@@ -1092,6 +1094,7 @@ public final class AssemblyBasedCallerUtils {
             if ( haplotypesWithCall.isEmpty() ) {
                 continue;
             }
+            final GenotypeType callType = call.getNSamples() == 1 ? call.getGenotype(0).getType() : GenotypeType.UNAVAILABLE;
 
             // NB: callIsOnAllAltHaps does not necessarily mean a homozygous genotype, since this method does
             // not consider the reference haplotype
@@ -1111,10 +1114,17 @@ public final class AssemblyBasedCallerUtils {
                     continue;
                 }
 
-                // An uncalled ALT in a hom-ref call cannot establish phase with a heterozygous call.
+                final GenotypeType compType = comp.getNSamples() == 1 ? comp.getGenotype(0).getType() : GenotypeType.UNAVAILABLE;
+                // A homozygous ALT bridge must not connect hom-ref and heterozygous calls indirectly.
+                final Pair<Integer, PhaseGroup> callPhaseBefore = phaseSetMapping.get(call);
+                final Pair<Integer, PhaseGroup> compPhaseBefore = phaseSetMapping.get(comp);
+                final GenotypeType callGroupType = callPhaseBefore == null ? callType
+                        : constrainedGroupTypes.getOrDefault(callPhaseBefore.getLeft(), callType);
+                final GenotypeType compGroupType = compPhaseBefore == null ? compType
+                        : constrainedGroupTypes.getOrDefault(compPhaseBefore.getLeft(), compType);
                 if (call.getNSamples() == 1 && comp.getNSamples() == 1
-                        && ((call.getGenotype(0).isHomRef() && comp.getGenotype(0).isHet())
-                        || (call.getGenotype(0).isHet() && comp.getGenotype(0).isHomRef()))) {
+                        && ((callGroupType == GenotypeType.HOM_REF && compGroupType == GenotypeType.HET)
+                        || (callGroupType == GenotypeType.HET && compGroupType == GenotypeType.HOM_REF))) {
                     continue;
                 }
 
@@ -1189,6 +1199,18 @@ public final class AssemblyBasedCallerUtils {
                         else if ( ! phaseSetMapping.containsKey(comp) ){
                             final Pair<Integer, PhaseGroup> callPhase = phaseSetMapping.get(call);
                             phaseSetMapping.put(comp, Pair.of(callPhase.getLeft(), callPhase.getRight().equals(PhaseGroup.PHASE_01) ? PhaseGroup.PHASE_10 : PhaseGroup.PHASE_01));
+                        }
+                    }
+                }
+                // Record either constraining member on creation or extension. These groups never merge.
+                if (callPhaseBefore == null || compPhaseBefore == null) {
+                    final Pair<Integer, PhaseGroup> callPhase = phaseSetMapping.get(call);
+                    final Pair<Integer, PhaseGroup> compPhase = phaseSetMapping.get(comp);
+                    if (callPhase != null && compPhase != null && callPhase.getLeft().equals(compPhase.getLeft())) {
+                        if (callType == GenotypeType.HOM_REF || callType == GenotypeType.HET) {
+                            constrainedGroupTypes.put(callPhase.getLeft(), callType);
+                        } else if (compType == GenotypeType.HOM_REF || compType == GenotypeType.HET) {
+                            constrainedGroupTypes.put(callPhase.getLeft(), compType);
                         }
                     }
                 }
