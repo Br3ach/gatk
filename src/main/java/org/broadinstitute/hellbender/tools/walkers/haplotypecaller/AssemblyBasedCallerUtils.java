@@ -728,16 +728,130 @@ public final class AssemblyBasedCallerUtils {
     public static List<VariantContext> phaseCalls(final List<VariantContext> calls, final Set<Haplotype> calledHaplotypes) {
 
         // construct a mapping from alternate allele to the set of haplotypes that contain that allele
-        final Map<VariantContext, Set<Haplotype>> haplotypeMap = constructHaplotypeMapping(calls, calledHaplotypes);
+        final Map<VariantContext, Pair<VariantContext, Boolean>> spanningDeletionParents = new HashMap<>();
+        final Map<VariantContext, Set<Haplotype>> haplotypeMap =
+                constructHaplotypeMapping(calls, calledHaplotypes, spanningDeletionParents);
 
         // construct a mapping from call to phase set ID
         final Map<VariantContext, Pair<Integer, PhaseGroup>> phaseSetMapping =
-                constructPhaseSetMapping(calls, haplotypeMap);
+                constructPhaseSetMapping(calls, haplotypeMap, spanningDeletionParents);
         final int uniqueCounterEndValue = Math.toIntExact(phaseSetMapping.values().stream().map(Pair::getLeft).distinct().count());
 
         // we want to establish (potential) *groups* of phased variants, so we need to be smart when looking at pairwise phasing partners
-        return constructPhaseGroups(calls, phaseSetMapping, uniqueCounterEndValue);
+        final List<VariantContext> phased = constructPhaseGroups(calls, phaseSetMapping, uniqueCounterEndValue);
+        for (int i = 0; i < calls.size(); i++) {
+            final VariantContext child = calls.get(i);
+            final Pair<VariantContext, Boolean> link = spanningDeletionParents.get(child);
+            final Pair<Integer, PhaseGroup> childPhase = phaseSetMapping.get(child);
+            if (link != null && childPhase != null) {
+                final Pair<Integer, PhaseGroup> parentPhase = phaseSetMapping.get(link.getLeft());
+                if (parentPhase == null || !parentPhase.getLeft().equals(childPhase.getLeft())
+                        || parentPhase.getRight().equals(childPhase.getRight()) != link.getRight()) {
+                    phased.set(i, child);
+                    phaseSetMapping.remove(child);
+                }
+            }
+        }
+        removeUnsupportedDeletionGroups(calls, calledHaplotypes, haplotypeMap, phaseSetMapping, spanningDeletionParents, phased);
+        return phased;
     }
+
+    // Check both copies of ALT/ALT deletion groups and deletion-linked phase sets across the whole group.
+    // Check REF/deletion links to ordinary variants against their own two called copies below.
+    private static void removeUnsupportedDeletionGroups(final List<VariantContext> calls,
+            final Set<Haplotype> calledHaplotypes,
+            final Map<VariantContext, Set<Haplotype>> haplotypeMap,
+            final Map<VariantContext, Pair<Integer, PhaseGroup>> phaseSetMapping,
+            final Map<VariantContext, Pair<VariantContext, Boolean>> spanningDeletionParents,
+            final List<VariantContext> phased) {
+        final Map<Integer, List<Set<Haplotype>>> copySupport = new HashMap<>();
+        final Set<Integer> linkedGroups = new HashSet<>();
+        phaseSetMapping.forEach((call, phase) -> {
+            if (spanningDeletionParents.containsKey(call)) {
+                linkedGroups.add(phase.getLeft());
+            }
+            final Genotype g = call.getNSamples() == 1 ? call.getGenotype(0) : null;
+            if (g != null && !g.getAlleles().contains(call.getReference()) && getCalledDeletionForPhasing(call, g) != null) {
+                copySupport.computeIfAbsent(phase.getLeft(),
+                        key -> List.of(new HashSet<>(calledHaplotypes), new HashSet<>(calledHaplotypes)));
+            }
+        });
+        linkedGroups.forEach(group -> copySupport.computeIfAbsent(group,
+                key -> List.of(new HashSet<>(calledHaplotypes), new HashSet<>(calledHaplotypes))));
+        final List<Haplotype> haplotypes = new ArrayList<>(calledHaplotypes);
+        for (int i = 0; i < calls.size(); i++) {
+            final VariantContext call = calls.get(i);
+            final Pair<Integer, PhaseGroup> phase = phaseSetMapping.get(call);
+            final List<Set<Haplotype>> copies = phase == null ? null : copySupport.get(phase.getLeft());
+            if (copies != null) {
+                final Genotype g = phased.get(i).getGenotype(0);
+                if (g.isPhased() && g.getPloidy() == 2 && (g.isHet() || linkedGroups.contains(phase.getLeft()))) {
+                    final Map<Allele, List<Haplotype>> support = createAlleleMapper(call, call.getStart(), haplotypes, true);
+                    for (int copy = 0; copy < 2; copy++) {
+                        final Allele allele = g.getAllele(copy);
+                        if (Allele.SPAN_DEL.equals(allele)) {
+                            copies.get(copy).retainAll(spanningDeletionParents.containsKey(call)
+                                    ? haplotypeMap.getOrDefault(call, Collections.emptySet()) : Collections.emptySet());
+                        } else {
+                            copies.get(copy).retainAll(support.getOrDefault(allele, Collections.emptyList()));
+                        }
+                    }
+                } else if (linkedGroups.contains(phase.getLeft())) {
+                    copies.get(0).clear();
+                    copies.get(1).clear();
+                }
+            }
+        }
+        for (int i = 0; i < calls.size(); i++) {
+            final Pair<Integer, PhaseGroup> phase = phaseSetMapping.get(calls.get(i));
+            final List<Set<Haplotype>> copies = phase == null ? null : copySupport.get(phase.getLeft());
+            if (copies != null && (copies.get(0).isEmpty() || copies.get(1).isEmpty())) {
+                phased.set(i, calls.get(i));
+            }
+        }
+        final Set<Integer> unsupportedGroups = new HashSet<>();
+        for (int i = 0; i < calls.size(); i++) {
+            final VariantContext parent = calls.get(i);
+            final Pair<Integer, PhaseGroup> parentPhase = phaseSetMapping.get(parent);
+            final Genotype parentGT = phased.get(i).getGenotype(0);
+            if (parentPhase == null || !parentGT.isPhased() || !parentGT.getAlleles().contains(parent.getReference())
+                    || getCalledDeletionForPhasing(parent, parentGT) == null) {
+                continue;
+            }
+            final List<Set<Haplotype>> supportedCopies = List.of(
+                    new HashSet<>(calledHaplotypes), new HashSet<>(calledHaplotypes));
+            boolean hasOrdinaryCompanion = false;
+            for (int j = 0; j < calls.size(); j++) {
+                final VariantContext companion = calls.get(j);
+                final Pair<Integer, PhaseGroup> companionPhase = phaseSetMapping.get(companion);
+                final Genotype companionGT = phased.get(j).getGenotype(0);
+                if (companionPhase == null || !parentPhase.getLeft().equals(companionPhase.getLeft())
+                        || !companionGT.isPhased() || !companionGT.isHet()
+                        || !companionGT.getAlleles().contains(companion.getReference())
+                        || companionGT.getAlleles().stream().anyMatch(a -> a.isNoCall() || a.isSymbolic())) {
+                    continue;
+                }
+                hasOrdinaryCompanion |= getCalledDeletionForPhasing(companion, companionGT) == null;
+                final Map<Allele, List<Haplotype>> companionSupport =
+                        createAlleleMapper(companion, companion.getStart(), haplotypes, true);
+                for (int copy = 0; copy < 2; copy++) {
+                    supportedCopies.get(copy).retainAll(
+                            companionSupport.getOrDefault(companionGT.getAllele(copy), Collections.emptyList()));
+                }
+            }
+            if (hasOrdinaryCompanion && (supportedCopies.get(0).isEmpty() || supportedCopies.get(1).isEmpty())) {
+                unsupportedGroups.add(parentPhase.getLeft());
+            }
+        }
+        for (int i = 0; i < calls.size(); i++) {
+            final Pair<Integer, PhaseGroup> phase = phaseSetMapping.get(calls.get(i));
+            if (phase != null && unsupportedGroups.contains(phase.getLeft())) {
+                phased.set(i, calls.get(i));
+            }
+        }
+    }
+
+
 
     /**
      * Construct the mapping from alternate allele to the set of haplotypes that contain that allele
@@ -749,8 +863,42 @@ public final class AssemblyBasedCallerUtils {
     @VisibleForTesting
     static Map<VariantContext, Set<Haplotype>> constructHaplotypeMapping(final List<VariantContext> originalCalls,
                                                                                    final Set<Haplotype> calledHaplotypes) {
+        return constructHaplotypeMapping(originalCalls, calledHaplotypes, new HashMap<>());
+    }
+
+    private static Map<VariantContext, Set<Haplotype>> constructHaplotypeMapping(
+            final List<VariantContext> originalCalls, final Set<Haplotype> calledHaplotypes,
+            final Map<VariantContext, Pair<VariantContext, Boolean>> spanningDeletionParents) {
         final Map<VariantContext, Set<Haplotype>> haplotypeMap = new HashMap<>(originalCalls.size());
         for ( final VariantContext call : originalCalls ) {
+            final Genotype genotype = call.getNSamples() == 1 ? call.getGenotype(0) : null;
+            if (hasCalledSpanningDeletion(call, genotype)) {
+                final Map<Allele, List<Haplotype>> support =
+                        createAlleleMapper(call, call.getStart(), new ArrayList<>(calledHaplotypes), true);
+                final Set<Haplotype> starHaplotypes = new HashSet<>(support.getOrDefault(Allele.SPAN_DEL, Collections.emptyList()));
+                final Pair<VariantContext, Boolean> parent = getSpanningDeletionParent(call, starHaplotypes, haplotypeMap,
+                        spanningDeletionParents, calledHaplotypes, support);
+                if (parent != null) {
+                    spanningDeletionParents.put(call, parent);
+                }
+                haplotypeMap.put(call, parent == null ? Collections.emptySet() : starHaplotypes);
+                continue;
+            }
+
+            final Allele deletion = getCalledDeletionForPhasing(call, genotype);
+            if (deletion != null) {
+                final Map<Allele, List<Haplotype>> support =
+                        createAlleleMapper(call, call.getStart(), new ArrayList<>(calledHaplotypes), true);
+                final Allele other = genotype.getAllele(0).equals(deletion) ? genotype.getAllele(1) : genotype.getAllele(0);
+                final Set<Haplotype> deletionHaplotypes = new HashSet<>(support.getOrDefault(deletion, Collections.emptyList()));
+                final Set<Haplotype> otherHaplotypes = new HashSet<>(support.getOrDefault(other, Collections.emptyList()));
+                if (other.isReference() || (!deletionHaplotypes.isEmpty() && !otherHaplotypes.isEmpty()
+                        && Collections.disjoint(deletionHaplotypes, otherHaplotypes))) {
+                    haplotypeMap.put(call, deletionHaplotypes);
+                    continue;
+                }
+            }
+
             // don't try to phase if there is not exactly 1 alternate allele
             if ( ! isBiallelicWithOneSiteSpecificAlternateAllele(call) ) {
                 haplotypeMap.put(call, Collections.emptySet());
@@ -770,12 +918,128 @@ public final class AssemblyBasedCallerUtils {
         return haplotypeMap;
     }
 
+    // The generic star allele can pool support from distinct upstream deletions.
+    // Only use it for phase when every supporting haplotype identifies the same called parent.
+    // The Boolean is true when the parent's phase marker is its concrete deletion.
+    private static Pair<VariantContext, Boolean> getSpanningDeletionParent(final VariantContext child, final Set<Haplotype> starHaplotypes,
+            final Map<VariantContext, Set<Haplotype>> earlierSupport,
+            final Map<VariantContext, Pair<VariantContext, Boolean>> spanningDeletionParents,
+            final Set<Haplotype> calledHaplotypes, final Map<Allele, List<Haplotype>> childSupport) {
+        Event deletion = null;
+        for (final Haplotype haplotype : starHaplotypes) {
+            final List<Event> earlier = haplotype.getEventMap().getOverlappingEvents(child.getStart()).stream()
+                    .filter(event -> event.getStart() < child.getStart()).toList();
+            if (earlier.size() != 1 || !earlier.get(0).isSimpleDeletion()
+                    || !earlier.get(0).getContig().equals(child.getContig())
+                    || (deletion != null && !deletion.equals(earlier.get(0)))) {
+                return null;
+            }
+            deletion = earlier.get(0);
+        }
+        if (deletion == null) {
+            return null;
+        }
+
+        Pair<VariantContext, Boolean> parent = null;
+        final Event event = deletion;
+        for (final VariantContext candidate : earlierSupport.keySet()) {
+            if (!candidate.getContig().equals(child.getContig()) || candidate.getStart() != event.getStart()
+                    || candidate.getNSamples() != 1) {
+                continue;
+            }
+            final Genotype g = candidate.getGenotype(0);
+            if (g.getPloidy() != 2 || !g.isHet() || g.getAlleles().stream().anyMatch(
+                    allele -> allele.isNoCall() || (allele.isSymbolic() && !Allele.SPAN_DEL.equals(allele)))) {
+                continue;
+            }
+            final List<Allele> deletions = g.getAlleles().stream()
+                    .filter(allele -> !allele.isReference() && !Allele.SPAN_DEL.equals(allele)
+                            && allelesAreConsistent(event.refAllele(), event.altAllele(), candidate.getReference(), allele))
+                    .toList();
+            if (deletions.size() != 1) {
+                continue;
+            }
+            if (parent != null) {
+                return null;
+            }
+            parent = Pair.of(candidate, !g.getAlleles().contains(Allele.SPAN_DEL));
+        }
+        if (parent == null) {
+            return null;
+        }
+        final VariantContext call = parent.getLeft();
+        final Set<Haplotype> marked = earlierSupport.get(call);
+        final Genotype childGenotype = child.getGenotype(0);
+        final Allele childOther = childGenotype.getAllele(childGenotype.getAllele(0).equals(Allele.SPAN_DEL) ? 1 : 0);
+        final List<Haplotype> childCompanionSupport = childSupport.getOrDefault(childOther, Collections.emptyList());
+        if (parent.getRight()) {
+            if (!marked.equals(starHaplotypes)) {
+                return null;
+            }
+            if (call.getGenotype(0).getAlleles().contains(call.getReference())) {
+                final Map<Allele, List<Haplotype>> support =
+                        createAlleleMapper(call, call.getStart(), new ArrayList<>(calledHaplotypes), true);
+                if (Collections.disjoint(support.getOrDefault(call.getReference(), Collections.emptyList()), childCompanionSupport)) {
+                    return null;
+                }
+            }
+            return parent;
+        }
+        // The middle call is oriented by its upstream star. Its own deletion is on the other copy.
+        if (!spanningDeletionParents.containsKey(call) || marked.isEmpty() || !Collections.disjoint(marked, starHaplotypes)
+                || Collections.disjoint(marked, childCompanionSupport)) {
+            return null;
+        }
+        final Genotype g = call.getGenotype(0);
+        final Allele concreteDeletion = g.getAllele(g.getAllele(0).equals(Allele.SPAN_DEL) ? 1 : 0);
+        final Map<Allele, List<Haplotype>> support = createAlleleMapper(call, call.getStart(), new ArrayList<>(calledHaplotypes), true);
+        return new HashSet<>(support.getOrDefault(concreteDeletion, Collections.emptyList())).equals(starHaplotypes) ? parent : null;
+    }
+
     /**
      * If at least one exists, returns a concrete (not NONREF) site-specific (starting at the current POS) alternate allele
      * from within the current variant context.
      */
     private static Allele getSiteSpecificAlternateAllele(final VariantContext call) {
         return call.getAlternateAlleles().stream().filter(AssemblyBasedCallerUtils::isSiteSpecificAltAllele).findFirst().orElse(null);
+    }
+
+    private static boolean hasCalledSpanningDeletion(final VariantContext call, final Genotype genotype) {
+        if (call.getNSamples() != 1 || genotype == null || genotype.getPloidy() != 2
+                || genotype.getAlleles().stream().anyMatch(Allele::isNoCall)
+                || Collections.frequency(genotype.getAlleles(), Allele.SPAN_DEL) != 1) {
+            return false;
+        }
+        final Allele other = genotype.getAllele(genotype.getAllele(0).equals(Allele.SPAN_DEL) ? 1 : 0);
+        return other.isReference() || (!other.isSymbolic() && isSiteSpecificAltAllele(other));
+    }
+
+    // Use the called deletion, including when the call has uncalled alternate alleles or padding.
+    private static Allele getCalledDeletionForPhasing(final VariantContext call, final Genotype genotype) {
+        if (call.getNSamples() != 1 || genotype == null || genotype.getPloidy() != 2 || !genotype.isHet()
+                || genotype.getAlleles().stream().anyMatch(a -> a.isNoCall() || a.isSymbolic())) {
+            return null;
+        }
+        final List<Allele> deletions = genotype.getAlleles().stream()
+                .filter(a -> !a.isReference() && call.getAlternateAlleles().contains(a)
+                        && isPureDeletion(call.getReference(), a))
+                .toList();
+        return deletions.size() == 1 ? deletions.get(0) : null;
+    }
+
+    private static boolean isPureDeletion(final Allele ref, final Allele alt) {
+        if (alt.isSymbolic() || ref.length() <= alt.length()) {
+            return false;
+        }
+        final String reference = ref.getDisplayString();
+        final String alternate = alt.getDisplayString();
+        for (int prefix = 1; prefix <= alternate.length(); prefix++) {
+            if (reference.startsWith(alternate.substring(0, prefix))
+                    && reference.endsWith(alternate.substring(prefix))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -789,6 +1053,12 @@ public final class AssemblyBasedCallerUtils {
     @VisibleForTesting
     static Map<VariantContext, Pair<Integer, PhaseGroup>> constructPhaseSetMapping(final List<VariantContext> originalCalls,
                                                                                    final Map<VariantContext, Set<Haplotype>> haplotypeMap) {
+        return constructPhaseSetMapping(originalCalls, haplotypeMap, Collections.emptyMap());
+    }
+
+    private static Map<VariantContext, Pair<Integer, PhaseGroup>> constructPhaseSetMapping(
+            final List<VariantContext> originalCalls, final Map<VariantContext, Set<Haplotype>> haplotypeMap,
+            final Map<VariantContext, Pair<VariantContext, Boolean>> spanningDeletionParents) {
 
         // count the total number of alternate haplotypes
         final Set<Haplotype> haplotypesWithCalledVariants = new HashSet<>();
@@ -830,9 +1100,12 @@ public final class AssemblyBasedCallerUtils {
                 // genotype for the variant is homozygous since this method does not consider the ref haplotype
                 final boolean compIsOnAllAltHaps = haplotypesWithComp.size() == totalAvailableHaplotypes;
 
-                if ( (haplotypesWithCall.size() == haplotypesWithComp.size() && haplotypesWithCall.containsAll(haplotypesWithComp))
-                        || (callIsOnAllAltHaps &&  callHaplotypesAvailableForPhasing.containsAll(haplotypesWithComp))
-                        || compIsOnAllAltHaps ) {
+                final Pair<VariantContext, Boolean> link = spanningDeletionParents.get(comp);
+                final boolean linked = link != null && link.getLeft().equals(call);
+                if (linked ? link.getRight() :
+                        (haplotypesWithCall.size() == haplotypesWithComp.size() && haplotypesWithCall.containsAll(haplotypesWithComp))
+                        || (callIsOnAllAltHaps && callHaplotypesAvailableForPhasing.containsAll(haplotypesWithComp))
+                        || compIsOnAllAltHaps) {
 
                     // create a new group if these are the first entries
                     if ( ! phaseSetMapping.containsKey(call) ) {
@@ -853,10 +1126,6 @@ public final class AssemblyBasedCallerUtils {
                         phaseSetMapping.put(call, Pair.of(uniqueCounter, PhaseGroup.PHASE_01));
                         phaseSetMapping.put(comp, Pair.of(uniqueCounter, PhaseGroup.PHASE_01));
 
-                        // if the call was on all alternate haps but the comp isn't, we need to narrow down the set of
-                        // alt haps we'll consider for further phasing other variants with the call
-                        callHaplotypesAvailableForPhasing.retainAll(haplotypesWithComp);
-
                         uniqueCounter++;
                     }
                     // otherwise it's part of an existing group so use that group's unique ID
@@ -864,9 +1133,14 @@ public final class AssemblyBasedCallerUtils {
                         final Pair<Integer, PhaseGroup> callPhase = phaseSetMapping.get(call);
                         phaseSetMapping.put(comp, Pair.of(callPhase.getLeft(), callPhase.getRight()));
                     }
+
+                    // Narrow a shared anchor only for a comparison in the same group and orientation.
+                    if ( callIsOnAllAltHaps && phaseSetMapping.get(call).equals(phaseSetMapping.get(comp)) ) {
+                        callHaplotypesAvailableForPhasing.retainAll(haplotypesWithComp);
+                    }
                 }
                 // if the variants are apart on *all* alternate haplotypes, record that fact
-                else if ( haplotypesWithCall.size() + haplotypesWithComp.size() == totalAvailableHaplotypes ) {
+                else if (linked || haplotypesWithCall.size() + haplotypesWithComp.size() == totalAvailableHaplotypes) {
 
                     final Set<Haplotype> intersection = new HashSet<>();
                     intersection.addAll(haplotypesWithCall);
@@ -983,20 +1257,35 @@ public final class AssemblyBasedCallerUtils {
     private static VariantContext phaseVC(final VariantContext vc, final String ID, final PhaseGroup phaseGT, final int phaseSetID) {
         final List<Genotype> phasedGenotypes = new ArrayList<>();
         for ( final Genotype g : vc.getGenotypes() ) {
-            final List<Allele> alleles = g.getAlleles();
-            final List<Allele> newAlleles = new ArrayList<>(alleles);
-            final int phasedAltAlleleIndex = phaseGT.getAltAlleleIndex();
-            if (g.isHet() && ! isSiteSpecificAltAllele(newAlleles.get(phasedAltAlleleIndex))) {
-                Collections.reverse(newAlleles);
+            final List<Allele> newAlleles = new ArrayList<>(g.getAlleles());
+            final boolean phaseStar = hasCalledSpanningDeletion(vc, g);
+            final Allele selectedAllele = phaseStar ? Allele.SPAN_DEL : getCalledDeletionForPhasing(vc, g);
+            if (g.isHet()) {
+                final Allele alleleInPhase = newAlleles.get(phaseGT.getAltAlleleIndex());
+                if (selectedAllele == null ? !isSiteSpecificAltAllele(alleleInPhase)
+                        : !selectedAllele.equals(alleleInPhase)) {
+                    Collections.reverse(newAlleles);
+                }
             }
-            final Genotype genotype = new GenotypeBuilder(g)
-                .alleles(newAlleles)
-                .phased(true)
-                .attribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY, ID)
-                .attribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY, phaseGT.getDescription())
-                .attribute(VCFConstants.PHASE_SET_KEY, phaseSetID)
-                .make();
-            phasedGenotypes.add(genotype);
+            final GenotypeBuilder builder = new GenotypeBuilder(g).alleles(newAlleles).phased(true);
+            if (selectedAllele == null || (!phaseStar && g.getAlleles().contains(vc.getReference()))) {
+                builder.attribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY, ID)
+                        .attribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY, phaseGT.getDescription());
+            } else {
+                // Legacy PGT is relative to one site ALT. GT and PS also describe calls outside that model.
+                final Map<String, Object> retained = new HashMap<>(g.getExtendedAttributes());
+                retained.remove(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY);
+                retained.remove(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY);
+                builder.noAttributes().attributes(retained);
+                final Allele siteAlt = phaseStar ? newAlleles.stream()
+                        .filter(AssemblyBasedCallerUtils::isSiteSpecificAltAllele).findFirst().orElse(null) : null;
+                if (siteAlt != null && newAlleles.contains(siteAlt)) {
+                    builder.attribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY, ID)
+                            .attribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY,
+                                    newAlleles.get(0).equals(siteAlt) ? "1|0" : "0|1");
+                }
+            }
+            phasedGenotypes.add(builder.attribute(VCFConstants.PHASE_SET_KEY, phaseSetID).make());
         }
         return new VariantContextBuilder(vc).genotypes(phasedGenotypes).make();
     }
