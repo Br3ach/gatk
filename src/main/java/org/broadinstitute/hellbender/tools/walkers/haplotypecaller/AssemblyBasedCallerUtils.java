@@ -828,7 +828,6 @@ public final class AssemblyBasedCallerUtils {
             }
             final List<Set<Haplotype>> supportedCopies = List.of(
                     new HashSet<>(calledHaplotypes), new HashSet<>(calledHaplotypes));
-            boolean hasOrdinaryCompanion = false;
             for (int j = 0; j < calls.size(); j++) {
                 final VariantContext companion = calls.get(j);
                 final Pair<Integer, PhaseGroup> companionPhase = phaseSetMapping.get(companion);
@@ -839,7 +838,6 @@ public final class AssemblyBasedCallerUtils {
                         || companionGT.getAlleles().stream().anyMatch(a -> a.isNoCall() || a.isSymbolic())) {
                     continue;
                 }
-                hasOrdinaryCompanion |= getCalledDeletionForPhasing(companion, companionGT) == null;
                 final Map<Allele, List<Haplotype>> companionSupport =
                         createAlleleMapper(companion, companion.getStart(), haplotypes, true);
                 for (int copy = 0; copy < 2; copy++) {
@@ -847,7 +845,7 @@ public final class AssemblyBasedCallerUtils {
                             companionSupport.getOrDefault(companionGT.getAllele(copy), Collections.emptyList()));
                 }
             }
-            if (hasOrdinaryCompanion && (supportedCopies.get(0).isEmpty() || supportedCopies.get(1).isEmpty())) {
+            if (supportedCopies.get(0).isEmpty() || supportedCopies.get(1).isEmpty()) {
                 unsupportedGroups.add(parentPhase.getLeft());
             }
         }
@@ -1030,17 +1028,20 @@ public final class AssemblyBasedCallerUtils {
         }
         final List<Allele> deletions = genotype.getAlleles().stream()
                 .filter(a -> !a.isReference() && call.getAlternateAlleles().contains(a)
-                        && isPureDeletion(call.getReference(), a))
+                        && isPureDeletion(call.getReference(), a, call.getStart()))
                 .toList();
         return deletions.size() == 1 ? deletions.get(0) : null;
     }
 
-    private static boolean isPureDeletion(final Allele ref, final Allele alt) {
+    private static boolean isPureDeletion(final Allele ref, final Allele alt, final int position) {
         if (alt.isSymbolic() || ref.length() <= alt.length()) {
             return false;
         }
         final String reference = ref.getDisplayString();
         final String alternate = alt.getDisplayString();
+        if (position == 1 && reference.endsWith(alternate)) {
+            return true;
+        }
         for (int prefix = 1; prefix <= alternate.length(); prefix++) {
             if (reference.startsWith(alternate.substring(0, prefix))
                     && reference.endsWith(alternate.substring(prefix))) {
