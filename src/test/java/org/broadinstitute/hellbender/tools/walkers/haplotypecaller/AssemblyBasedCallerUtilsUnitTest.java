@@ -1788,6 +1788,130 @@ public class AssemblyBasedCallerUtilsUnitTest extends GATKBaseTest {
     }
 
     @Test
+    public void testCalledDeletionPhaseIdIgnoresUncalledAltOrder() {
+        final Allele ref = Allele.create("ACCG", true);
+        final Allele deletion = Allele.create("A");
+        final Allele uncalled = Allele.create("AT");
+        final Allele snp = Allele.create("T");
+        for (final boolean calledFirst : List.of(true, false)) {
+            final List<Allele> parentAlleles = calledFirst ? List.of(ref, deletion, uncalled)
+                    : List.of(ref, uncalled, deletion);
+            final VariantContext parent = phasingCall(100, parentAlleles, 0, parentAlleles.indexOf(deletion));
+            final VariantContext child = phasingCall(102,
+                    List.of(Allele.create("C", true), snp, Allele.SPAN_DEL), 1, 2);
+            final Haplotype deleted = phasingHaplotype("GAAACT",
+                    new Event(parent.getContig(), parent.getStart(), ref, deletion));
+            final Haplotype intact = phasingHaplotype("GACCGACT",
+                    new Event(child.getContig(), child.getStart(), child.getReference(), snp));
+            final List<VariantContext> calls = List.of(parent, child);
+            final List<VariantContext> actual = phaseCalls(calls, Set.of(deleted, intact));
+            assertOnlyPhaseChanged(actual, calls);
+            final Genotype parentGT = actual.get(0).getGenotype(0);
+            final Genotype childGT = actual.get(1).getGenotype(0);
+            assertDeletionAndStarInPhase(parentGT, childGT, deletion);
+            final String expectedPid = "100_ACCG_A";
+            Assert.assertEquals(parentGT.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY), expectedPid);
+            Assert.assertEquals(childGT.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY), expectedPid);
+            final String parentPgt = String.valueOf(parentGT.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY));
+            final String childPgt = String.valueOf(childGT.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY));
+            Assert.assertEquals(parentPgt.charAt(parentGT.getAlleles().indexOf(deletion) * 2), '1');
+            Assert.assertEquals(childPgt.charAt(childGT.getAlleles().indexOf(snp) * 2), '1');
+        }
+    }
+
+    @Test
+    public void testCalledDeletionParentStaysOutsideUncalledSnpPhaseGroup() {
+        final Allele parentRef = Allele.create("CAA", true);
+        final Allele parentDeletion = Allele.create("CA");
+        final Allele parentInsertion = Allele.create("CAAA");
+        final Allele uncalledDeletion = Allele.create("C");
+        final VariantContext parent = phasingCall(100,
+                List.of(parentRef, parentDeletion, parentInsertion, uncalledDeletion), 1, 2);
+        final VariantContext first = phasingCall(110,
+                List.of(Allele.create("C", true), Allele.create("T")), 0, 0);
+        final VariantContext second = phasingCall(120,
+                List.of(Allele.create("G", true), Allele.create("A")), 0, 0);
+        final Haplotype withCalledDeletion = phasingHaplotype("GCAAACG",
+                new Event(parent.getContig(), parent.getStart(), parentRef, parentDeletion),
+                vcToEvent(first), vcToEvent(second));
+        final Haplotype withCalledInsertion = phasingHaplotype("GCAAACGT",
+                new Event(parent.getContig(), parent.getStart(), parentRef, parentInsertion));
+        final Haplotype withUncalledDeletion = phasingHaplotype("GCAACGT",
+                new Event(parent.getContig(), parent.getStart(), parentRef, uncalledDeletion));
+        final List<VariantContext> calls = List.of(parent, first, second);
+        final List<VariantContext> phased = phaseCalls(calls,
+                Set.of(withCalledDeletion, withCalledInsertion, withUncalledDeletion));
+        assertOnlyPhaseChanged(phased, calls);
+
+        final Genotype parentGT = phased.get(0).getGenotype(0);
+        final Genotype firstGT = phased.get(1).getGenotype(0);
+        final Genotype secondGT = phased.get(2).getGenotype(0);
+        Assert.assertTrue(firstGT.isPhased() && secondGT.isPhased(), "The established reference group must remain");
+        Assert.assertEquals(firstGT.getExtendedAttribute(VCFConstants.PHASE_SET_KEY),
+                secondGT.getExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+        Assert.assertEquals(String.valueOf(firstGT.getExtendedAttribute(VCFConstants.PHASE_SET_KEY)), "110");
+        Assert.assertFalse(parentGT.isPhased(), "The called parent must not borrow phase from uncalled SNP ALTs");
+        Assert.assertFalse(parentGT.hasExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+        Assert.assertEquals(firstGT.getAlleles(), first.getGenotype(0).getAlleles());
+        Assert.assertEquals(secondGT.getAlleles(), second.getGenotype(0).getAlleles());
+    }
+
+    @Test
+    public void testCalledDeletionParentStaysOutsideUpstreamUncalledSnpPhaseGroup() {
+        final Allele ref = Allele.create("CAA", true);
+        final Allele deletion = Allele.create("CA");
+        final Allele insertion = Allele.create("CAAA");
+        final VariantContext first = phasingCall(90,
+                List.of(Allele.create("C", true), Allele.create("T")), 0, 0);
+        final VariantContext parent = phasingCall(100,
+                List.of(ref, deletion, insertion, Allele.create("C")), 1, 2);
+        final VariantContext second = phasingCall(110,
+                List.of(Allele.create("G", true), Allele.create("A")), 0, 0);
+        final Haplotype deleted = phasingHaplotype("GCAAACG", vcToEvent(first),
+                new Event(parent.getContig(), parent.getStart(), ref, deletion), vcToEvent(second));
+        final Haplotype inserted = phasingHaplotype("GCAAACGT",
+                new Event(parent.getContig(), parent.getStart(), ref, insertion));
+        final Haplotype uncalled = phasingHaplotype("GCAACGT",
+                new Event(parent.getContig(), parent.getStart(), ref, parent.getAlternateAllele(2)));
+        final List<VariantContext> calls = List.of(first, parent, second);
+        final List<VariantContext> phased = phaseCalls(calls, Set.of(deleted, inserted, uncalled));
+        assertOnlyPhaseChanged(phased, calls);
+        final Genotype firstGT = phased.get(0).getGenotype(0);
+        final Genotype parentGT = phased.get(1).getGenotype(0);
+        final Genotype secondGT = phased.get(2).getGenotype(0);
+        Assert.assertTrue(firstGT.isPhased() && secondGT.isPhased());
+        Assert.assertEquals(firstGT.getExtendedAttribute(VCFConstants.PHASE_SET_KEY),
+                secondGT.getExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+        Assert.assertFalse(parentGT.isPhased(), "An upstream uncalled SNP ALT must not phase the parent");
+        Assert.assertFalse(parentGT.hasExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+    }
+
+    @Test
+    public void testDeletionInsertionParentPhasesWithCalledSnpSupport() {
+        final Allele ref = Allele.create("CAA", true);
+        final Allele deletion = Allele.create("CA");
+        final Allele insertion = Allele.create("CAAA");
+        final VariantContext parent = phasingCall(100,
+                List.of(ref, deletion, insertion, Allele.create("C")), 1, 2);
+        final VariantContext child = phasingCall(110,
+                List.of(Allele.create("C", true), Allele.create("T")), 0, 1);
+        final Haplotype deleted = phasingHaplotype("GCAAACG",
+                new Event(parent.getContig(), parent.getStart(), ref, deletion), vcToEvent(child));
+        final Haplotype inserted = phasingHaplotype("GCAAACGT",
+                new Event(parent.getContig(), parent.getStart(), ref, insertion));
+        final List<VariantContext> calls = List.of(parent, child);
+        final List<VariantContext> phased = phaseCalls(calls, Set.of(deleted, inserted));
+        assertOnlyPhaseChanged(phased, calls);
+        final Genotype parentGT = phased.get(0).getGenotype(0);
+        final Genotype childGT = phased.get(1).getGenotype(0);
+        Assert.assertTrue(parentGT.isPhased() && childGT.isPhased());
+        Assert.assertEquals(parentGT.getExtendedAttribute(VCFConstants.PHASE_SET_KEY),
+                childGT.getExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+        Assert.assertEquals(parentGT.getAlleles().indexOf(deletion),
+                childGT.getAlleles().indexOf(child.getAlternateAllele(0)));
+    }
+
+    @Test
     public void testDeletionChainChildUsesItsAuthenticatedParentBeforeOtherCalls() {
         final VariantContext ordinary = phasingCall(55, List.of(Allele.create("G", true), Allele.create("A")), 0, 1);
         final VariantContext first = phasingCall(59, List.of(Allele.create("GGGAA", true), Allele.create("G")), 0, 1);

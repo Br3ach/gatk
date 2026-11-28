@@ -1208,6 +1208,66 @@ public class GenotypeGVCFsIntegrationTest extends CommandLineProgramTest {
     }
 
     @Test
+    public void testChangedThreeCopyCallLosesUnsupportedPhase() throws IOException {
+        final File input = createTempFile("changedThreeCopyPhase", ".g.vcf");
+        final String source = Files.readString(getTestFile("single-sample-phase.g.vcf").toPath());
+        final String original = "\t0|0|1:24:80:95,0,90,100,105,110,115,120,125,130:150";
+        Assert.assertTrue(source.contains(original));
+        Files.writeString(input.toPath(), source.replace(original,
+                "\t0|0|0:24:80:95,0,90,100,105,110,115,120,125,130:150"));
+        final File output = createTempFile("changedThreeCopyPhase", ".vcf");
+        runCommandLine(new ArgumentsBuilder().addReference(getTestFile("single-sample-phase.fa"))
+                .addVCF(input).addOutput(output));
+        final VariantContext call = VariantContextTestUtils.getVariantContexts(output).stream()
+                .filter(vc -> vc.getStart() == 150).findFirst().orElseThrow();
+        final Genotype gt = call.getGenotype(0);
+        Assert.assertEquals(gt.getAlleles(), List.of(call.getReference(), call.getReference(), call.getAlternateAllele(0)));
+        Assert.assertFalse(gt.isPhased());
+        Assert.assertFalse(gt.hasExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+    }
+
+    @Test
+    public void testReorderedUnchangedThreeCopyCallKeepsPhase() throws IOException {
+        final File input = createTempFile("reorderedThreeCopyPhase", ".g.vcf");
+        final String source = Files.readString(getTestFile("single-sample-phase.g.vcf").toPath());
+        final String original = "\t0|0|1:24:80:95,0,90,100,105,110,115,120,125,130:150";
+        Assert.assertTrue(source.contains(original));
+        Files.writeString(input.toPath(), source.replace(original,
+                "\t0|1|0:24:80:95,0,90,100,105,110,115,120,125,130:150"));
+        final File output = createTempFile("reorderedThreeCopyPhase", ".vcf");
+        runCommandLine(new ArgumentsBuilder().addReference(getTestFile("single-sample-phase.fa"))
+                .addVCF(input).addOutput(output));
+        final VariantContext call = VariantContextTestUtils.getVariantContexts(output).stream()
+                .filter(vc -> vc.getStart() == 150).findFirst().orElseThrow();
+        final Genotype gt = call.getGenotype(0);
+        Assert.assertEquals(gt.getAlleles(), List.of(call.getReference(), call.getAlternateAllele(0), call.getReference()));
+        Assert.assertTrue(gt.isPhased());
+        Assert.assertEquals(String.valueOf(gt.getExtendedAttribute(VCFConstants.PHASE_SET_KEY)), "150");
+    }
+
+    @Test
+    public void testHomAltKeepsNormalizedPhysicalPhase() throws IOException {
+        final File input = createTempFile("homAltPhysicalPhase", ".g.vcf");
+        final String source = Files.readString(getTestFile("single-sample-phase.g.vcf").toPath());
+        final String original = "GT:DP:GQ:PL:PS\t0|0|1:24:80:95,0,90,100,105,110,115,120,125,130:150";
+        Assert.assertTrue(source.contains(original));
+        Files.writeString(input.toPath(), source.replace(original,
+                "GT:DP:GQ:PGT:PID:PL:PS\t1|1:24:80:0|1:hom_phase:90,95,0,100,105,110:150"));
+        final File output = createTempFile("homAltPhysicalPhase", ".vcf");
+        runCommandLine(new ArgumentsBuilder().addReference(getTestFile("single-sample-phase.fa"))
+                .addVCF(input).addOutput(output));
+        final VariantContext call = VariantContextTestUtils.getVariantContexts(output).stream()
+                .filter(vc -> vc.getStart() == 150).findFirst().orElseThrow();
+        final Genotype gt = call.getGenotype(0);
+        Assert.assertEquals(gt.getAlleles(), List.of(call.getAlternateAllele(0), call.getAlternateAllele(0)));
+        Assert.assertEquals(Collections.frequency(gt.getAlleles(), call.getAlternateAllele(0)), 2);
+        Assert.assertTrue(gt.isPhased());
+        Assert.assertEquals(gt.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY), "1|1");
+        Assert.assertEquals(gt.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY), "hom_phase");
+        Assert.assertEquals(String.valueOf(gt.getExtendedAttribute(VCFConstants.PHASE_SET_KEY)), "150");
+    }
+
+    @Test
     public void testUncalledConcreteAltDoesNotDisplaceCalledDeletionPhase() {
         final File output = createTempFile("singleSamplePhaseExtraAlt", ".vcf");
         final ArgumentsBuilder args = new ArgumentsBuilder()

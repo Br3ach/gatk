@@ -738,7 +738,8 @@ public final class AssemblyBasedCallerUtils {
         final int uniqueCounterEndValue = Math.toIntExact(phaseSetMapping.values().stream().map(Pair::getLeft).distinct().count());
 
         // we want to establish (potential) *groups* of phased variants, so we need to be smart when looking at pairwise phasing partners
-        final List<VariantContext> phased = constructPhaseGroups(calls, phaseSetMapping, uniqueCounterEndValue);
+        final List<VariantContext> phased = constructPhaseGroups(calls, phaseSetMapping, uniqueCounterEndValue,
+                spanningDeletionParents);
         final Set<Integer> invalidGroups = new HashSet<>();
         for (int i = 0; i < calls.size(); i++) {
             final VariantContext child = calls.get(i);
@@ -1105,6 +1106,17 @@ public final class AssemblyBasedCallerUtils {
                     continue;
                 }
 
+                // An uncalled SNP ALT cannot phase an ALT/ALT deletion parent to a hom-ref call in either order.
+                if (call.getNSamples() == 1 && comp.getNSamples() == 1
+                        && ((!call.getGenotype(0).getAlleles().contains(call.getReference())
+                                && getCalledDeletionForPhasing(call, call.getGenotype(0)) != null
+                                && comp.getGenotype(0).isHomRef())
+                        || (call.getGenotype(0).isHomRef()
+                                && !comp.getGenotype(0).getAlleles().contains(comp.getReference())
+                                && getCalledDeletionForPhasing(comp, comp.getGenotype(0)) != null))) {
+                    continue;
+                }
+
                 // if the variants are together on all alt haplotypes, record that fact. NB that this does not mean that the
                 // genotype for the variant is homozygous since this method does not consider the ref haplotype
                 final boolean compIsOnAllAltHaps = haplotypesWithComp.size() == totalAvailableHaplotypes;
@@ -1197,6 +1209,12 @@ public final class AssemblyBasedCallerUtils {
     static List<VariantContext> constructPhaseGroups(final List<VariantContext> originalCalls,
                                                                final Map<VariantContext, Pair<Integer, PhaseGroup>> phaseSetMapping,
                                                                final int indexTo) {
+        return constructPhaseGroups(originalCalls, phaseSetMapping, indexTo, Collections.emptyMap());
+    }
+
+    private static List<VariantContext> constructPhaseGroups(final List<VariantContext> originalCalls,
+            final Map<VariantContext, Pair<Integer, PhaseGroup>> phaseSetMapping, final int indexTo,
+            final Map<VariantContext, Pair<VariantContext, Boolean>> spanningDeletionParents) {
         final List<VariantContext> phasedCalls = new ArrayList<>(originalCalls);
 
         // if we managed to find any phased groups, update the VariantContexts
@@ -1222,7 +1240,9 @@ public final class AssemblyBasedCallerUtils {
             // update the VCs
             for ( final int index : indexes ) {
                 final VariantContext originalCall = originalCalls.get(index);
-                final VariantContext phasedCall = phaseVC(originalCall, uniqueID, phaseSetMapping.get(originalCall).getRight(), phaseSetID);
+                final VariantContext phasedCall = phaseVC(originalCall, uniqueID,
+                        phaseSetMapping.get(originalCall).getRight(), phaseSetID,
+                        spanningDeletionParents.containsKey(originalCall));
                 phasedCalls.set(index, phasedCall);
             }
         }
@@ -1255,7 +1275,10 @@ public final class AssemblyBasedCallerUtils {
      * @return non-null String
      */
     private static String createUniqueID(final VariantContext vc) {
-        return String.format("%d_%s_%s", vc.getStart(), vc.getReference().getDisplayString(), vc.getAlternateAllele(0).getDisplayString());
+        final Genotype genotype = vc.getNSamples() == 1 ? vc.getGenotype(0) : null;
+        final Allele calledDeletion = getCalledDeletionForPhasing(vc, genotype);
+        final Allele anchor = calledDeletion == null ? vc.getAlternateAllele(0) : calledDeletion;
+        return String.format("%d_%s_%s", vc.getStart(), vc.getReference().getDisplayString(), anchor.getDisplayString());
     }
 
     /**
@@ -1266,11 +1289,12 @@ public final class AssemblyBasedCallerUtils {
      * @param phaseGT the phase GT string to use
      * @return phased non-null variant context
      */
-    private static VariantContext phaseVC(final VariantContext vc, final String ID, final PhaseGroup phaseGT, final int phaseSetID) {
+    private static VariantContext phaseVC(final VariantContext vc, final String ID, final PhaseGroup phaseGT,
+            final int phaseSetID, final boolean linkedStar) {
         final List<Genotype> phasedGenotypes = new ArrayList<>();
         for ( final Genotype g : vc.getGenotypes() ) {
             final List<Allele> newAlleles = new ArrayList<>(g.getAlleles());
-            final boolean phaseStar = hasCalledSpanningDeletion(vc, g);
+            final boolean phaseStar = linkedStar && hasCalledSpanningDeletion(vc, g);
             final Allele selectedAllele = phaseStar ? Allele.SPAN_DEL : getCalledDeletionForPhasing(vc, g);
             if (g.isHet()) {
                 final Allele alleleInPhase = newAlleles.get(phaseGT.getAltAlleleIndex());

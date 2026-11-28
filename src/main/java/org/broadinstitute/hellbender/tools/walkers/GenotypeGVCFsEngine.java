@@ -223,7 +223,7 @@ public class GenotypeGVCFsEngine
 
         // Reverse trimming changes allele strings while retaining the site allele order.
         final List<Allele> ordered = new ArrayList<>(2);
-        if (before != null && before.getPloidy() == 2 && after.getPloidy() == 2
+        if (before != null && before.getPloidy() == after.getPloidy() && after.getPloidy() > 0
                 && retainedAlleles.size() == result.getNAlleles()) {
             for (final Allele allele : before.getAlleles()) {
                 final int index = retainedAlleles.indexOf(allele);
@@ -233,8 +233,8 @@ public class GenotypeGVCFsEngine
                 ordered.add(result.getAlleles().get(index));
             }
         }
-        final boolean sameCall = ordered.size() == 2 && (ordered.equals(after.getAlleles())
-                || ordered.get(0).equals(after.getAllele(1)) && ordered.get(1).equals(after.getAllele(0)));
+        final boolean sameCall = ordered.size() == after.getPloidy() && ordered.stream().allMatch(allele ->
+                Collections.frequency(ordered, allele) == Collections.frequency(after.getAlleles(), allele));
         final boolean phased = sameCall && before.isPhased();
         final GenotypeBuilder builder = new GenotypeBuilder(after).phased(phased);
         final Map<String, Object> attributes = new HashMap<>(after.getExtendedAttributes());
@@ -250,7 +250,7 @@ public class GenotypeGVCFsEngine
         if (sameCall && before.hasExtendedAttribute(pgtKey)) {
             final String pgt = mapPhysicalPhase(source, before, String.valueOf(before.getExtendedAttribute(pgtKey)));
             if (pgt != null) {
-                attributes.put(pgtKey, pgt);
+                attributes.put(pgtKey, after.isHomVar() ? GenotypeGVCFs.PHASED_HOM_VAR_STRING : pgt);
                 if (before.hasExtendedAttribute(pidKey)) {
                     attributes.put(pidKey, before.getExtendedAttribute(pidKey));
                 }
