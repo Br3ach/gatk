@@ -2321,4 +2321,88 @@ public class AssemblyBasedCallerUtilsUnitTest extends GATKBaseTest {
         Utils.validate(vc.getNAlleles() == 2, "must be biallelic");
         return new Event(vc.getContig(), vc.getStart(), vc.getReference(), vc.getAlternateAllele(0));
     }
+
+    @Test
+    public void testRefDeletionParentStaysOutsideUncalledHomRefGroup() {
+        final Allele ref = Allele.create("CAA", true);
+        final Allele deletion = Allele.create("CA");
+        final VariantContext parent = phasingCall(100, List.of(ref, deletion, Allele.create("CAAA")), 0, 1);
+        final VariantContext first = phasingCall(110, List.of(Allele.create("C", true), Allele.create("T")), 0, 0);
+        final VariantContext second = phasingCall(120, List.of(Allele.create("G", true), Allele.create("A")), 0, 0);
+        final Haplotype deleted = phasingHaplotype("GCAAACG",
+                new Event(parent.getContig(), parent.getStart(), ref, deletion), vcToEvent(first), vcToEvent(second));
+        final Haplotype intact = phasingHaplotype("GCAAACGT");
+        final List<VariantContext> calls = List.of(parent, first, second);
+        final List<VariantContext> phased = phaseCalls(calls, Set.of(deleted, intact));
+        assertOnlyPhaseChanged(phased, calls);
+        final Genotype parentGT = phased.get(0).getGenotype(0);
+        final Genotype firstGT = phased.get(1).getGenotype(0);
+        final Genotype secondGT = phased.get(2).getGenotype(0);
+        Assert.assertFalse(parentGT.isPhased(), "The parent must stay outside the uncalled-ALT group");
+        Assert.assertTrue(firstGT.isPhased() && secondGT.isPhased());
+        Assert.assertEquals(firstGT.getExtendedAttribute(VCFConstants.PHASE_SET_KEY),
+                secondGT.getExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+    }
+
+    @Test
+    public void testRefDeletionParentStaysOutsideUpstreamUncalledHomRefGroup() {
+        final Allele ref = Allele.create("CAA", true);
+        final Allele deletion = Allele.create("CA");
+        final VariantContext first = phasingCall(90, List.of(Allele.create("C", true), Allele.create("T")), 0, 0);
+        final VariantContext parent = phasingCall(100, List.of(ref, deletion, Allele.create("CAAA")), 0, 1);
+        final VariantContext second = phasingCall(110, List.of(Allele.create("G", true), Allele.create("A")), 0, 0);
+        final Haplotype deleted = phasingHaplotype("GCAAACG", vcToEvent(first),
+                new Event(parent.getContig(), parent.getStart(), ref, deletion), vcToEvent(second));
+        final Haplotype intact = phasingHaplotype("GCAAACGT");
+        final List<VariantContext> calls = List.of(first, parent, second);
+        final List<VariantContext> phased = phaseCalls(calls, Set.of(deleted, intact));
+        assertOnlyPhaseChanged(phased, calls);
+        final Genotype firstGT = phased.get(0).getGenotype(0);
+        final Genotype parentGT = phased.get(1).getGenotype(0);
+        final Genotype secondGT = phased.get(2).getGenotype(0);
+        Assert.assertFalse(parentGT.isPhased(), "The parent must stay outside the 0/0 group in either order");
+        Assert.assertTrue(firstGT.isPhased() && secondGT.isPhased());
+        Assert.assertEquals(firstGT.getExtendedAttribute(VCFConstants.PHASE_SET_KEY),
+                secondGT.getExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+    }
+
+    @Test
+    public void testCalledBridgeDoesNotCarryUncalledHomRefAltIntoParentGroup() {
+        final Allele ref = Allele.create("CAA", true);
+        final Allele deletion = Allele.create("CA");
+        final VariantContext parent = phasingCall(100, List.of(ref, deletion, Allele.create("CAAA")), 0, 1);
+        final VariantContext bridge = phasingCall(105, List.of(Allele.create("C", true), Allele.create("T")), 0, 1);
+        final VariantContext uncalled = phasingCall(110, List.of(Allele.create("G", true), Allele.create("A")), 0, 0);
+        final Haplotype deleted = phasingHaplotype("GCAAACG",
+                new Event(parent.getContig(), parent.getStart(), ref, deletion), vcToEvent(bridge), vcToEvent(uncalled));
+        final Haplotype intact = phasingHaplotype("GCAAACGT");
+        final List<VariantContext> calls = List.of(parent, bridge, uncalled);
+        final List<VariantContext> phased = phaseCalls(calls, Set.of(deleted, intact));
+        assertOnlyPhaseChanged(phased, calls);
+        final Genotype parentGT = phased.get(0).getGenotype(0);
+        final Genotype bridgeGT = phased.get(1).getGenotype(0);
+        final Genotype uncalledGT = phased.get(2).getGenotype(0);
+        Assert.assertTrue(parentGT.isPhased() && bridgeGT.isPhased(), "Called support should phase the parent and bridge");
+        Assert.assertEquals(parentGT.getExtendedAttribute(VCFConstants.PHASE_SET_KEY),
+                bridgeGT.getExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+        Assert.assertFalse(uncalledGT.isPhased(), "An uncalled ALT must not join indirectly through the bridge");
+    }
+
+    @Test
+    public void testHomRefHomVarComparisonRemainsEligible() {
+        // Preserve the legacy comparison boundary. These fabricated haplotypes are not a dosage model.
+        final VariantContext homRef = phasingCall(100,
+                List.of(Allele.create("C", true), Allele.create("T")), 0, 0);
+        final VariantContext homVar = phasingCall(110,
+                List.of(Allele.create("G", true), Allele.create("A")), 1, 1);
+        final Haplotype alternate = phasingHaplotype("GCAAACG", vcToEvent(homRef), vcToEvent(homVar));
+        final Haplotype intact = phasingHaplotype("GCAAACGT");
+        final List<VariantContext> calls = List.of(homRef, homVar);
+        final List<VariantContext> phased = phaseCalls(calls, Set.of(alternate, intact));
+        assertOnlyPhaseChanged(phased, calls);
+        Assert.assertTrue(phased.get(0).getGenotype(0).isPhased());
+        Assert.assertTrue(phased.get(1).getGenotype(0).isPhased());
+        Assert.assertEquals(phased.get(0).getGenotype(0).getExtendedAttribute(VCFConstants.PHASE_SET_KEY),
+                phased.get(1).getGenotype(0).getExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+    }
 }

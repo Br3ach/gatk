@@ -1106,14 +1106,10 @@ public final class AssemblyBasedCallerUtils {
                     continue;
                 }
 
-                // An uncalled SNP ALT cannot phase an ALT/ALT deletion parent to a hom-ref call in either order.
+                // An uncalled ALT in a hom-ref call cannot establish phase with a heterozygous call.
                 if (call.getNSamples() == 1 && comp.getNSamples() == 1
-                        && ((!call.getGenotype(0).getAlleles().contains(call.getReference())
-                                && getCalledDeletionForPhasing(call, call.getGenotype(0)) != null
-                                && comp.getGenotype(0).isHomRef())
-                        || (call.getGenotype(0).isHomRef()
-                                && !comp.getGenotype(0).getAlleles().contains(comp.getReference())
-                                && getCalledDeletionForPhasing(comp, comp.getGenotype(0)) != null))) {
+                        && ((call.getGenotype(0).isHomRef() && comp.getGenotype(0).isHet())
+                        || (call.getGenotype(0).isHet() && comp.getGenotype(0).isHomRef()))) {
                     continue;
                 }
 

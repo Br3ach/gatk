@@ -1227,6 +1227,50 @@ public class GenotypeGVCFsIntegrationTest extends CommandLineProgramTest {
     }
 
     @Test
+    public void testForcedChangedCallClearsUnsupportedPhase() throws IOException {
+        final File input = createTempFile("forcedChangedPhase", ".g.vcf");
+        final String source = Files.readString(getTestFile("single-sample-phase.g.vcf").toPath());
+        final String original = "\t0|0|1:24:80:95,0,90,100,105,110,115,120,125,130:150";
+        Assert.assertTrue(source.contains(original));
+        Files.writeString(input.toPath(), source.replace(original,
+                "\t0|0|0:24:80:95,0,90,100,105,110,115,120,125,130:150"));
+        runCommandLine(new ArgumentsBuilder().addInput(input).getArgsList(), "IndexFeatureFile");
+        final File output = createTempFile("forcedChangedPhase", ".vcf");
+        runCommandLine(new ArgumentsBuilder().addReference(getTestFile("single-sample-phase.fa"))
+                .addVCF(input).add(GenotypeGVCFs.FORCE_OUTPUT_INTERVALS_NAME, "fixture:150-150")
+                .addOutput(output));
+        final VariantContext call = VariantContextTestUtils.getVariantContexts(output).stream()
+                .filter(vc -> vc.getStart() == 150).findFirst().orElseThrow();
+        final Genotype gt = call.getGenotype(0);
+        Assert.assertEquals(gt.getAlleles(), List.of(call.getReference(), call.getReference(), call.getAlternateAllele(0)));
+        Assert.assertFalse(gt.isPhased());
+        Assert.assertFalse(gt.hasExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+        Assert.assertFalse(gt.hasExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY));
+        Assert.assertFalse(gt.hasExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY));
+    }
+
+    @Test
+    public void testForcedOverlappingRecordWithoutExactStartDoesNotCarryPhase() throws IOException {
+        final File input = createTempFile("forcedOverlappingPhase", ".g.vcf");
+        Files.copy(getTestFile("single-sample-phase.g.vcf").toPath(), input.toPath(),
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        runCommandLine(new ArgumentsBuilder().addInput(input).getArgsList(), "IndexFeatureFile");
+        Assert.assertTrue(VariantContextTestUtils.getVariantContexts(input).stream()
+                .noneMatch(vc -> vc.getStart() == 102));
+        final File output = createTempFile("forcedOverlappingPhase", ".vcf");
+        runCommandLine(new ArgumentsBuilder().addReference(getTestFile("single-sample-phase.fa"))
+                .addVCF(input).add(GenotypeGVCFs.FORCE_OUTPUT_INTERVALS_NAME, "fixture:102-102")
+                .addOutput(output));
+        final VariantContext call = VariantContextTestUtils.getVariantContexts(output).stream()
+                .filter(vc -> vc.getStart() == 102).findFirst().orElseThrow();
+        final Genotype gt = call.getGenotype(0);
+        Assert.assertFalse(gt.isPhased());
+        Assert.assertFalse(gt.hasExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+        Assert.assertFalse(gt.hasExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY));
+        Assert.assertFalse(gt.hasExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY));
+    }
+
+    @Test
     public void testReorderedUnchangedThreeCopyCallKeepsPhase() throws IOException {
         final File input = createTempFile("reorderedThreeCopyPhase", ".g.vcf");
         final String source = Files.readString(getTestFile("single-sample-phase.g.vcf").toPath());
@@ -1509,5 +1553,48 @@ public class GenotypeGVCFsIntegrationTest extends CommandLineProgramTest {
         Assert.assertEquals(calledGenotypes.size(), 1);
         Assert.assertEquals(calledGenotypes.get(0).getAlleles().size(), 1);
         Assert.assertEquals(calledGenotypes.get(0).getAlleles().get(0), Allele.create("TA", false));
+    }
+    @Test
+    public void testForceOutputRetainsDeletionStarPhase() {
+        final File reference = getTestFile("native-padded-a.fa");
+        final File gvcf = createTempFile("forcePhase", ".g.vcf");
+        runCommandLine(new ArgumentsBuilder().addReference(reference)
+                .addInput(getTestFile("native-padded-a.bam")).add("L", "fabricated:130-195").addOutput(gvcf)
+                .add("ERC", "GVCF").add("native-pair-hmm-threads", 1)
+                .add("create-output-variant-index", true).add("add-output-vcf-command-line", false).getArgsList(),
+                "HaplotypeCaller");
+        final Map<Integer, VariantContext> caller = indexedNativeRows(gvcf);
+        final Genotype callerParent = caller.get(160).getGenotype(0);
+        final Genotype callerChild = caller.get(163).getGenotype(0);
+        final Allele deletion = callerParent.getAllele(1);
+        Assert.assertTrue(callerParent.isPhased() && callerChild.isPhased());
+        Assert.assertTrue(deletion.length() < caller.get(160).getReference().length());
+        Assert.assertEquals(callerParent.getExtendedAttribute(VCFConstants.PHASE_SET_KEY),
+                callerChild.getExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+        Assert.assertEquals(phaseCopy(callerParent, deletion), phaseCopy(callerChild, Allele.SPAN_DEL));
+
+        final File ordinary = createTempFile("ordinaryPhase", ".vcf");
+        final File forced = createTempFile("forcedPhase", ".vcf");
+        for (final File output : List.of(ordinary, forced)) {
+            final ArgumentsBuilder args = new ArgumentsBuilder().addReference(reference).addVCF(gvcf)
+                    .addInterval(new SimpleInterval("fabricated", 130, 195)).addOutput(output)
+                    .add("create-output-variant-index", true);
+            if (output.equals(forced)) {
+                args.add(GenotypeGVCFs.FORCE_OUTPUT_INTERVALS_NAME, "fabricated:130-195");
+            }
+            runCommandLine(args);
+            final Map<Integer, VariantContext> rows = indexedNativeRows(output);
+            final Genotype parent = rows.get(160).getGenotype(0);
+            final Genotype child = rows.get(163).getGenotype(0);
+            Assert.assertEquals(parent.getAlleles(), callerParent.getAlleles());
+            Assert.assertEquals(child.getAlleles(), callerChild.getAlleles());
+            Assert.assertEquals(parent.getExtendedAttribute(VCFConstants.PHASE_SET_KEY),
+                    child.getExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+            Assert.assertEquals(phaseCopy(parent, deletion), phaseCopy(child, Allele.SPAN_DEL));
+            Assert.assertEquals(parent.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY), "0|1");
+            Assert.assertEquals(child.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY), "1|0");
+            Assert.assertEquals(parent.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY),
+                    child.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY));
+        }
     }
 }

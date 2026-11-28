@@ -125,7 +125,7 @@ public class GenotypeGVCFsEngine
                                      ReferenceConfidenceVariantContextMerger merger, boolean somaticInput, double tlodThreshold,
                                      double sqThreshold, double afTolerance, final boolean outputNonVariants) //do work for apply
     {
-        final List<VariantContext> variantsToProcess = getVariantSubsetToProcess(loc, variants);
+        final List<VariantContext> variantsToProcess = getVariantSubsetToProcess(loc, variants, outputNonVariants);
 
         if (dragStrParams == null || genotypeArgs.dontUseDragstrPriors) {
             ref.setWindow(10, 10); //TODO this matches the gatk3 behavior but may be unnecessary
@@ -433,11 +433,12 @@ public class GenotypeGVCFsEngine
         }
     }
 
-    // If includeNonVariants is set, we're using group-by-locus traversal. To match GATK3 GenotypeGVCFs,
+    // When emitting non-variants, we're using group-by-locus traversal. To match GATK3 GenotypeGVCFs,
     // see if there is a variant in the overlapping group that starts exactly at the locus start position, and if so
     // prioritize and process only that variant. Otherwise process all of the overlapping variants.
-    private List<VariantContext> getVariantSubsetToProcess(final Locatable loc, List<VariantContext> preProcessedVariants) {
-        if (includeNonVariants) {
+    private List<VariantContext> getVariantSubsetToProcess(final Locatable loc, List<VariantContext> preProcessedVariants,
+                                                           final boolean outputNonVariants) {
+        if (outputNonVariants) {
             final List<VariantContext> matchingStart =
                     preProcessedVariants.stream().filter(vc -> vc.getStart() == loc.getStart()).collect(Collectors.toList());
             if (matchingStart.size() == 0) {
