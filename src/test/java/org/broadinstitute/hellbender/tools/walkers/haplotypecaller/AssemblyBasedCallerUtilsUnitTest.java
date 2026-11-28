@@ -2448,8 +2448,13 @@ public class AssemblyBasedCallerUtilsUnitTest extends GATKBaseTest {
                 phasedParent.getExtendedAttribute(VCFConstants.PHASE_SET_KEY));
     }
 
-    @Test
-    public void testPartialReferenceCallCannotPhaseThroughUncalledSnp() {
+    @DataProvider
+    public Object[][] missingReferenceCallCases() {
+        return new Object[][] {{false}, {true}};
+    }
+
+    @Test(dataProvider = "missingReferenceCallCases")
+    public void testPartialReferenceCallCannotPhaseThroughUncalledSnp(final boolean fullyMissing) {
         final Allele deletion = Allele.create("CA");
         final VariantContext parent = phasingCall(100, List.of(Allele.create("CAA", true), deletion,
                 Allele.create("CAAA")), 0, 1);
@@ -2467,7 +2472,7 @@ public class AssemblyBasedCallerUtilsUnitTest extends GATKBaseTest {
         Assert.assertEquals(phasedSnp.getAlleles().indexOf(called.getAlternateAllele(0)),
                 phasedParent.getAlleles().indexOf(deletion));
 
-        final List<Allele> partialAlleles = List.of(called.getReference(), Allele.NO_CALL);
+        final List<Allele> partialAlleles = List.of(fullyMissing ? Allele.NO_CALL : called.getReference(), Allele.NO_CALL);
         final VariantContext partial = new VariantContextBuilder(called)
                 .genotypes(new GenotypeBuilder(called.getGenotype(0)).alleles(partialAlleles).make()).make();
         final List<VariantContext> calls = List.of(parent, partial);
@@ -2480,6 +2485,51 @@ public class AssemblyBasedCallerUtilsUnitTest extends GATKBaseTest {
         Assert.assertFalse(actual.hasExtendedAttribute(VCFConstants.PHASE_SET_KEY));
         Assert.assertFalse(actual.hasExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY));
         Assert.assertFalse(actual.hasExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY));
+    }
+
+    @Test
+    public void testMissingSnpDoesNotDisruptSupportedDeletionPhase() {
+        final Allele deletion = Allele.create("A");
+        final VariantContext firstAnchor = phasingCall(5, List.of(Allele.create("C", true), deletion), 1, 1);
+        final VariantContext secondAnchor = phasingCall(9,
+                List.of(Allele.create("T", true), Allele.create("G")), 1, 1);
+        final VariantContext parent = phasingCall(15, List.of(Allele.create("AGTCCT", true), deletion), 0, 1);
+        final VariantContext child = phasingCall(18, List.of(Allele.create("C", true), Allele.create("G"),
+                Allele.SPAN_DEL, Allele.NON_REF_ALLELE), 0, 2);
+        final VariantContext downstream = phasingCall(24,
+                List.of(Allele.create("A", true), Allele.create("T")), 0, 1);
+        final VariantContext missing = new VariantContextBuilder(downstream).genotypes(
+                new GenotypeBuilder(downstream.getGenotype(0)).alleles(List.of(Allele.NO_CALL, Allele.NO_CALL)).make()).make();
+        final Event anchor1 = vcToEvent(firstAnchor);
+        final Event anchor2 = vcToEvent(secondAnchor);
+        final Haplotype deleted = phasingHaplotype("GTACACTGGGCTATAGTGAACTGGTAC",
+                anchor1, anchor2, vcToEvent(parent));
+        final Haplotype withSiteAlt = phasingHaplotype("GTACACTGGGCTATAGTGCTGTGTACTGGTAC",
+                anchor1, anchor2,
+                new Event(child.getContig(), child.getStart(), child.getReference(), child.getAlternateAllele(0)),
+                vcToEvent(downstream));
+        final Haplotype withSiteRef = phasingHaplotype("GTACACTGGGCTATAGTCCTGTGAACTGGTAC",
+                anchor1, anchor2);
+        final Set<Haplotype> haplotypes = Set.of(deleted, withSiteAlt, withSiteRef);
+        final List<VariantContext> controlCalls = List.of(firstAnchor, secondAnchor, parent, child);
+        final List<VariantContext> control = phaseCalls(controlCalls, haplotypes);
+        assertDeletionAndStarInPhase(control.get(2).getGenotype(0), control.get(3).getGenotype(0), deletion);
+        final List<VariantContext> calls = List.of(firstAnchor, secondAnchor, parent, child, missing);
+        final List<VariantContext> phased = phaseCalls(calls, haplotypes);
+        assertOnlyPhaseChanged(phased, calls);
+        assertDeletionAndStarInPhase(phased.get(2).getGenotype(0), phased.get(3).getGenotype(0), deletion);
+        for (int i = 2; i < 4; i++) {
+            Assert.assertEquals(phased.get(i).getGenotype(0).getAlleles(), control.get(i).getGenotype(0).getAlleles());
+            Assert.assertEquals(phased.get(i).getGenotype(0).getExtendedAttribute(VCFConstants.PHASE_SET_KEY),
+                    control.get(i).getGenotype(0).getExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+        }
+        final Genotype missingGT = phased.get(4).getGenotype(0);
+        Assert.assertFalse(missingGT.isPhased());
+        Assert.assertEquals(missingGT.getAlleles(), missing.getGenotype(0).getAlleles());
+        Assert.assertEquals(missingGT.getExtendedAttributes(), missing.getGenotype(0).getExtendedAttributes());
+        Assert.assertFalse(missingGT.hasExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+        Assert.assertFalse(missingGT.hasExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY));
+        Assert.assertFalse(missingGT.hasExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY));
     }
 
     @Test

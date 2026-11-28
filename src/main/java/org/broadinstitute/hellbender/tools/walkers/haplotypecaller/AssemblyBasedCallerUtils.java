@@ -879,8 +879,8 @@ public final class AssemblyBasedCallerUtils {
         final Map<VariantContext, Set<Haplotype>> haplotypeMap = new HashMap<>(originalCalls.size());
         for ( final VariantContext call : originalCalls ) {
             final Genotype genotype = call.getNSamples() == 1 ? call.getGenotype(0) : null;
-            // A partial call cannot inherit phase from an uncalled site ALT.
-            if (genotype != null && genotype.isMixed()) {
+            // A genotype with missing alleles cannot inherit phase from an uncalled site ALT.
+            if (genotype != null && genotype.getAlleles().stream().anyMatch(Allele::isNoCall)) {
                 haplotypeMap.put(call, Collections.emptySet());
                 continue;
             }
