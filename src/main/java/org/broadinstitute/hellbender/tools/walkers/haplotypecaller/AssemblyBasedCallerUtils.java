@@ -1111,6 +1111,9 @@ public final class AssemblyBasedCallerUtils {
 
                 final Pair<VariantContext, Boolean> link = spanningDeletionParents.get(comp);
                 final boolean linked = link != null && link.getLeft().equals(call);
+                if (link != null && !linked) {
+                    continue;
+                }
                 if (linked ? link.getRight() :
                         (haplotypesWithCall.size() == haplotypesWithComp.size() && haplotypesWithCall.containsAll(haplotypesWithComp))
                         || (callIsOnAllAltHaps && callHaplotypesAvailableForPhasing.containsAll(haplotypesWithComp))
