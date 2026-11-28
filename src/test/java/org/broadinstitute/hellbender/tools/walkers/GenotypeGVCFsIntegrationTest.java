@@ -1208,6 +1208,29 @@ public class GenotypeGVCFsIntegrationTest extends CommandLineProgramTest {
     }
 
     @Test
+    public void testConflictingCanonicalPhysicalPhaseIsDropped() throws IOException {
+        final String source = Files.readString(getTestFile("single-sample-phase.g.vcf").toPath());
+        final String original = "1|0:16:35:1|0:fixture_phase:90,0,95,100,110,120:100";
+        Assert.assertTrue(source.contains(original));
+        for (final String conflictingPgt : List.of("0|1", "1|1")) {
+            final File input = createTempFile("conflictingPhysicalPhase", ".g.vcf");
+            Files.writeString(input.toPath(), source.replace(original,
+                    "1|0:16:35:" + conflictingPgt + ":fixture_phase:90,0,95,100,110,120:100"));
+            final File output = createTempFile("conflictingPhysicalPhase", ".vcf");
+            runCommandLine(new ArgumentsBuilder().addReference(getTestFile("single-sample-phase.fa"))
+                    .addVCF(input).addOutput(output));
+            final VariantContext call = VariantContextTestUtils.getVariantContexts(output).stream()
+                    .filter(vc -> vc.getStart() == 100).findFirst().orElseThrow();
+            final Genotype gt = call.getGenotype(0);
+            Assert.assertEquals(gt.getAlleles(), List.of(call.getAlternateAllele(0), call.getReference()));
+            Assert.assertTrue(gt.isPhased());
+            Assert.assertEquals(String.valueOf(gt.getExtendedAttribute(VCFConstants.PHASE_SET_KEY)), "100");
+            Assert.assertFalse(gt.hasExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY));
+            Assert.assertFalse(gt.hasExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY));
+        }
+    }
+
+    @Test
     public void testChangedThreeCopyCallLosesUnsupportedPhase() throws IOException {
         final File input = createTempFile("changedThreeCopyPhase", ".g.vcf");
         final String source = Files.readString(getTestFile("single-sample-phase.g.vcf").toPath());

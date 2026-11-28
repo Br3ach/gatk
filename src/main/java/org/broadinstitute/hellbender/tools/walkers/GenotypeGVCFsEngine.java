@@ -268,6 +268,12 @@ public class GenotypeGVCFsEngine
         }
         // Physical phase describes the site-specific ALT. A spanning deletion counts as 0 here.
         if (pgt.equals("0|1") || pgt.equals("1|0") || pgt.equals("1|1")) {
+            if (before.isPhased() && before.getPloidy() == 2 && before.isHet()) {
+                final Allele alt = siteAlts.get(0);
+                final String expected = (before.getAllele(0).equals(alt) ? "1" : "0") + "|"
+                        + (before.getAllele(1).equals(alt) ? "1" : "0");
+                return pgt.equals(expected) ? pgt : null;
+            }
             return pgt;
         }
         final Allele left = before.getAllele(0);
