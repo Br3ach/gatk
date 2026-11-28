@@ -12,5 +12,8 @@ src/main/resources/large/** filter=lfs diff=lfs merge=lfs -text
 src/test/resources/org/broadinstitute/hellbender/tools/walkers/GenotypeGVCFs/native-extra-alt.fa text eol=lf
 src/test/resources/org/broadinstitute/hellbender/tools/walkers/GenotypeGVCFs/native-extra-alt.fa.fai text eol=lf
 src/test/resources/org/broadinstitute/hellbender/tools/walkers/GenotypeGVCFs/native-extra-alt.dict text eol=lf
+src/test/resources/org/broadinstitute/hellbender/tools/walkers/GenotypeGVCFs/native-padded-a.fa text eol=lf
+src/test/resources/org/broadinstitute/hellbender/tools/walkers/GenotypeGVCFs/native-padded-a.fa.fai text eol=lf
+src/test/resources/org/broadinstitute/hellbender/tools/walkers/GenotypeGVCFs/native-padded-a.dict text eol=lf
 src/test/resources/org/broadinstitute/hellbender/tools/walkers/GenotypeGVCFs/single-sample-phase.fa text eol=lf
 src/test/resources/org/broadinstitute/hellbender/tools/walkers/GenotypeGVCFs/single-sample-phase.fa.fai text eol=lf

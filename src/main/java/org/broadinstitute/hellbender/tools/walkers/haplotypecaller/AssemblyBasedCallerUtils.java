@@ -879,6 +879,11 @@ public final class AssemblyBasedCallerUtils {
         final Map<VariantContext, Set<Haplotype>> haplotypeMap = new HashMap<>(originalCalls.size());
         for ( final VariantContext call : originalCalls ) {
             final Genotype genotype = call.getNSamples() == 1 ? call.getGenotype(0) : null;
+            // A partial spanning-deletion call cannot inherit phase from an uncalled site ALT.
+            if (genotype != null && genotype.isMixed() && genotype.getAlleles().contains(Allele.SPAN_DEL)) {
+                haplotypeMap.put(call, Collections.emptySet());
+                continue;
+            }
             if (hasCalledSpanningDeletion(call, genotype)) {
                 final Map<Allele, List<Haplotype>> support =
                         createAlleleMapper(call, call.getStart(), new ArrayList<>(calledHaplotypes), true);

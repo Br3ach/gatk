@@ -2024,6 +2024,32 @@ public class AssemblyBasedCallerUtilsUnitTest extends GATKBaseTest {
     }
 
     @Test
+    public void testMissingStarCannotPhaseThroughOneUncalledSnp() {
+        final Allele parentRef = Allele.create("ACCG", true);
+        final Allele deletion = Allele.create("A");
+        final VariantContext parent = phasingCall(100, List.of(parentRef, deletion), 0, 1);
+        final Allele childRef = Allele.create("C", true);
+        final Allele snp = Allele.create("T");
+        final List<Allele> missingStar = List.of(Allele.NO_CALL, Allele.SPAN_DEL);
+        final VariantContext child = new VariantContextBuilder("synthetic", "1", 102, 102,
+                List.of(childRef, snp, Allele.SPAN_DEL))
+                .genotypes(new GenotypeBuilder("sample", missingStar).DP(20).make()).make();
+        final Haplotype deleted = phasingHaplotype("GAAACT", vcToEvent(parent));
+        final Haplotype intact = phasingHaplotype("GACTGACT", new Event("1", 102, childRef, snp));
+        final List<VariantContext> calls = List.of(parent, child);
+        final Set<Haplotype> haplotypes = Set.of(deleted, intact);
+        final Genotype actual = phaseCalls(calls, haplotypes).get(1).getGenotype(0);
+        Assert.assertFalse(actual.isPhased(), "A missing allele cannot support a phased copy: " + actual
+                + ", fallback picked the uncalled SNP haplotype: "
+                + constructHaplotypeMapping(calls, haplotypes).get(child).equals(Set.of(intact)));
+        Assert.assertEquals(actual.getAlleles(), missingStar);
+        Assert.assertTrue(constructHaplotypeMapping(calls, haplotypes).get(child).isEmpty());
+        Assert.assertFalse(actual.hasExtendedAttribute(VCFConstants.PHASE_SET_KEY));
+        Assert.assertFalse(actual.hasExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY));
+        Assert.assertFalse(actual.hasExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY));
+    }
+
+    @Test
     public void testComplexNetDeletionRemainsUnphased() {
         // ATCG -> AC cannot be represented by removal of one contiguous segment.
         final Allele ref = Allele.create("ATCG", true);

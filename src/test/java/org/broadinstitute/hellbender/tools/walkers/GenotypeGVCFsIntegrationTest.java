@@ -16,6 +16,7 @@ import org.apache.commons.lang3.tuple.Pair;
 import org.broadinstitute.barclay.argparser.CommandLineException;
 import org.broadinstitute.hellbender.CommandLineProgramTest;
 import org.broadinstitute.hellbender.cmdline.StandardArgumentDefinitions;
+import org.broadinstitute.hellbender.exceptions.GATKException;
 import org.broadinstitute.hellbender.exceptions.UserException;
 import org.broadinstitute.hellbender.testutils.ArgumentsBuilder;
 import org.broadinstitute.hellbender.testutils.GenomicsDBTestUtils;
@@ -1264,6 +1265,31 @@ public class GenotypeGVCFsIntegrationTest extends CommandLineProgramTest {
     }
 
     @Test
+    public void testUnsupportedHaploidPhysicalPhaseIsDropped() throws IOException {
+        final String source = Files.readString(getTestFile("single-sample-phase.g.vcf").toPath());
+        final String original = "GT:DP:GQ:PL:PS\t0|0|1:24:80:95,0,90,100,105,110,115,120,125,130:150";
+        Assert.assertTrue(source.contains(original));
+        final File reference = getTestFile("single-sample-phase.fa");
+        for (final String sample : List.of("GT:DP:GQ:PL\t1:24:80:90,0,100",
+                "GT:DP:GQ:PGT:PID:PL\t1:24:80:1:haploid_phase:90,0,100")) {
+            final File input = createTempFile("haploidPhysicalPhase", ".g.vcf");
+            Files.writeString(input.toPath(), source.replace(original, sample));
+            final File output = createTempFile("haploidPhysicalPhase", ".vcf");
+            runCommandLine(new ArgumentsBuilder().addReference(reference).addVCF(input).addOutput(output));
+            final VariantContext call = VariantContextTestUtils.getVariantContexts(output).stream()
+                    .filter(vc -> vc.getStart() == 150).findFirst().orElseThrow();
+            final Genotype gt = call.getGenotype(0);
+            Assert.assertEquals(gt.getAlleles(), List.of(Allele.create("C")));
+            Assert.assertEquals(gt.getDP(), 24);
+            Assert.assertEquals(gt.getGQ(), 90);
+            Assert.assertEquals(gt.getAD(), new int[] {24, 0});
+            Assert.assertEquals(gt.getPL(), new int[] {90, 0});
+            Assert.assertFalse(gt.hasExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY));
+            Assert.assertFalse(gt.hasExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY));
+        }
+    }
+
+    @Test
     public void testChangedThreeCopyCallLosesUnsupportedPhase() throws IOException {
         final File input = createTempFile("changedThreeCopyPhase", ".g.vcf");
         final String source = Files.readString(getTestFile("single-sample-phase.g.vcf").toPath());
@@ -1324,6 +1350,22 @@ public class GenotypeGVCFsIntegrationTest extends CommandLineProgramTest {
         Assert.assertFalse(gt.hasExtendedAttribute(VCFConstants.PHASE_SET_KEY));
         Assert.assertFalse(gt.hasExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY));
         Assert.assertFalse(gt.hasExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY));
+    }
+
+    @Test
+    public void testForcedMultipleExactStartsStillFail() throws IOException {
+        final String source = Files.readString(getTestFile("single-sample-phase.g.vcf").toPath());
+        final String record = source.lines().filter(line -> line.startsWith("fixture\t106\t"))
+                .findFirst().orElseThrow();
+        final File input = createTempFile("duplicateForcedStarts", ".g.vcf");
+        Files.writeString(input.toPath(), source.replace(record, record + "\n" + record));
+        runCommandLine(new ArgumentsBuilder().addInput(input).getArgsList(), "IndexFeatureFile");
+        final GATKException failure = Assert.expectThrows(GATKException.class, () -> runCommandLine(
+                new ArgumentsBuilder().addReference(getTestFile("single-sample-phase.fa"))
+                        .addVCF(input).add(GenotypeGVCFs.FORCE_OUTPUT_INTERVALS_NAME, "fixture:106-106")
+                        .addOutput(createTempFile("duplicateForcedStarts", ".vcf"))));
+        Assert.assertTrue(failure.getCause() instanceof IllegalStateException);
+        Assert.assertTrue(failure.getCause().getMessage().contains("more than one variant starting at location"));
     }
 
     @Test
@@ -1629,28 +1671,64 @@ public class GenotypeGVCFsIntegrationTest extends CommandLineProgramTest {
                 callerChild.getExtendedAttribute(VCFConstants.PHASE_SET_KEY));
         Assert.assertEquals(phaseCopy(callerParent, deletion), phaseCopy(callerChild, Allele.SPAN_DEL));
 
-        final File ordinary = createTempFile("ordinaryPhase", ".vcf");
-        final File forced = createTempFile("forcedPhase", ".vcf");
-        for (final File output : List.of(ordinary, forced)) {
+        // A forced interval elsewhere still switches traversal to locus mode at these two records.
+        try (final VCFFileReader reader = new VCFFileReader(gvcf, true)) {
+            final List<Integer> starts = new ArrayList<>();
+            reader.query("fabricated", 163, 163).forEachRemaining(vc -> starts.add(vc.getStart()));
+            Assert.assertEquals(starts, List.of(160, 163));
+        }
+        Map<Integer, VariantContext> ordinaryRows = null;
+        for (final String forceInterval : List.of("", "fabricated:130-195", "fabricated:190-190")) {
+            final File output = createTempFile("forcePhaseGenotyped", ".vcf");
             final ArgumentsBuilder args = new ArgumentsBuilder().addReference(reference).addVCF(gvcf)
                     .addInterval(new SimpleInterval("fabricated", 130, 195)).addOutput(output)
                     .add("create-output-variant-index", true);
-            if (output.equals(forced)) {
-                args.add(GenotypeGVCFs.FORCE_OUTPUT_INTERVALS_NAME, "fabricated:130-195");
+            if (!forceInterval.isEmpty()) {
+                args.add(GenotypeGVCFs.FORCE_OUTPUT_INTERVALS_NAME, forceInterval);
             }
             runCommandLine(args);
             final Map<Integer, VariantContext> rows = indexedNativeRows(output);
+            if (ordinaryRows == null) {
+                ordinaryRows = rows;
+            }
+            Assert.assertTrue(rows.containsKey(160) && rows.containsKey(163),
+                    "Missing deletion or child with forced interval " + forceInterval + ": " + rows);
             final Genotype parent = rows.get(160).getGenotype(0);
             final Genotype child = rows.get(163).getGenotype(0);
-            Assert.assertEquals(parent.getAlleles(), callerParent.getAlleles());
-            Assert.assertEquals(child.getAlleles(), callerChild.getAlleles());
+            final String observed = "Forced interval '" + forceInterval + "': " + parent + " / " + child;
+            Assert.assertTrue(parent.isPhased() && child.isPhased(), observed);
             Assert.assertEquals(parent.getExtendedAttribute(VCFConstants.PHASE_SET_KEY),
-                    child.getExtendedAttribute(VCFConstants.PHASE_SET_KEY));
-            Assert.assertEquals(phaseCopy(parent, deletion), phaseCopy(child, Allele.SPAN_DEL));
-            Assert.assertEquals(parent.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY), "0|1");
-            Assert.assertEquals(child.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY), "1|0");
+                    child.getExtendedAttribute(VCFConstants.PHASE_SET_KEY), observed);
+            Assert.assertNotNull(parent.getExtendedAttribute(VCFConstants.PHASE_SET_KEY), observed);
+            Assert.assertEquals(phaseCopy(parent, deletion), phaseCopy(child, Allele.SPAN_DEL), observed);
+            final String parentPGT = String.valueOf(parent.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY));
+            final String childPGT = String.valueOf(child.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY));
+            Assert.assertEquals(parentPGT, phaseCopy(parent, deletion) == 0 ? "1|0" : "0|1", observed);
+            Assert.assertEquals(childPGT, phaseCopy(child, Allele.SPAN_DEL) == 0 ? "0|1" : "1|0", observed);
             Assert.assertEquals(parent.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY),
-                    child.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY));
+                    child.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY), observed);
+            for (final int pos : List.of(160, 163)) {
+                final Genotype actual = rows.get(pos).getGenotype(0);
+                final Genotype input = caller.get(pos).getGenotype(0);
+                final Genotype expected = ordinaryRows.get(pos).getGenotype(0);
+                Assert.assertEquals(actual.getPloidy(), input.getPloidy(), observed);
+                Assert.assertEquals(new HashSet<>(actual.getAlleles()), new HashSet<>(input.getAlleles()), observed);
+                Assert.assertEquals(actual.getAlleles(), expected.getAlleles(), observed);
+                Assert.assertEquals(actual.getExtendedAttribute(VCFConstants.PHASE_SET_KEY),
+                        expected.getExtendedAttribute(VCFConstants.PHASE_SET_KEY), observed);
+                Assert.assertEquals(actual.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY),
+                        expected.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_GT_KEY), observed);
+                Assert.assertEquals(actual.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY),
+                        expected.getExtendedAttribute(GATKVCFConstants.HAPLOTYPE_CALLER_PHASING_ID_KEY), observed);
+                Assert.assertEquals(rows.get(pos).getAttributeAsInt(VCFConstants.DEPTH_KEY, -1),
+                        ordinaryRows.get(pos).getAttributeAsInt(VCFConstants.DEPTH_KEY, -1), observed);
+                Assert.assertEquals(rows.get(pos).getAttributeAsInt(VCFConstants.ALLELE_NUMBER_KEY, -1),
+                        ordinaryRows.get(pos).getAttributeAsInt(VCFConstants.ALLELE_NUMBER_KEY, -1), observed);
+                Assert.assertEquals(actual.getDP(), expected.getDP(), observed);
+                Assert.assertEquals(actual.getGQ(), expected.getGQ(), observed);
+                Assert.assertEquals(actual.getAD(), expected.getAD(), observed);
+                Assert.assertEquals(actual.getPL(), expected.getPL(), observed);
+            }
         }
     }
 }

@@ -283,10 +283,13 @@ public class GenotypeGVCFsEngine
             }
             return pgt;
         }
+        if (before.getPloidy() != 2 || !before.isPhased()) {
+            return null;
+        }
         final Allele left = before.getAllele(0);
         final Allele right = before.getAllele(1);
         final String indexed = source.getAlleleIndex(left) + "|" + source.getAlleleIndex(right);
-        if (before.isPhased() && pgt.equals(indexed)) {
+        if (pgt.equals(indexed)) {
             final Allele alt = siteAlts.get(0);
             return (left.equals(alt) ? "1" : "0") + "|" + (right.equals(alt) ? "1" : "0");
         }
@@ -446,19 +449,18 @@ public class GenotypeGVCFsEngine
         }
     }
 
-    // When emitting non-variants, we're using group-by-locus traversal. To match GATK3 GenotypeGVCFs,
-    // see if there is a variant in the overlapping group that starts exactly at the locus start position, and if so
-    // prioritize and process only that variant. Otherwise process all of the overlapping variants.
+    // Forced output switches the whole traversal to loci. At unforced loci, prefer a unique exact-start
+    // record for single-sample inputs so a spanning record cannot duplicate the same sample.
     private List<VariantContext> getVariantSubsetToProcess(final Locatable loc, List<VariantContext> preProcessedVariants,
                                                            final boolean outputNonVariants) {
-        if (outputNonVariants) {
+        if (outputNonVariants || (preProcessedVariants.size() > 1 && inputVCFHeader.getNGenotypeSamples() == 1)) {
             final List<VariantContext> matchingStart =
                     preProcessedVariants.stream().filter(vc -> vc.getStart() == loc.getStart()).collect(Collectors.toList());
-            if (matchingStart.size() == 0) {
-                return preProcessedVariants;
-            }
-            else if (matchingStart.size() == 1) {
+            if (matchingStart.size() == 1) {
                 return matchingStart;
+            }
+            if (!outputNonVariants || matchingStart.isEmpty()) {
+                return preProcessedVariants;
             }
             // since this tool only accepts a single input source, there should never be
             // more than one variant at a given starting locus
